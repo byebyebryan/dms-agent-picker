@@ -1,0 +1,16 @@
+{
+  "$schema": "https://danklinux.com/schemas/plugin.json",
+  "id": "agentSessions",
+  "name": "Agent Sessions",
+  "description": "Open recent local and SSH Codex sessions from the launcher",
+  "version": "0.1.0",
+  "author": "Bryan Bai",
+  "icon": "terminal",
+  "type": "launcher",
+  "capabilities": ["launcher", "command-execution"],
+  "component": "./AgentSessions.qml",
+  "settings": "./AgentSessionsSettings.qml",
+  "trigger": "agent:",
+  "permissions": ["process", "settings_read", "settings_write"],
+  "dependencies": ["codex", "ghostty", "python", "ssh", "tmux"]
+}

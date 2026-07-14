@@ -1,0 +1,199 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+
+Item {
+    id: root
+
+    readonly property string pluginName: "agentSessions"
+    readonly property string helper: Quickshell.env("HOME") + "/.local/bin/dms-agent-picker"
+
+    property var pluginService: null
+    property string trigger: "agent:"
+    property string hosts: ""
+    property string terminal: Quickshell.env("TERMINAL") || "ghostty"
+    property int maxSessions: 20
+    property int refreshSeconds: 15
+    property var sessions: []
+    property var errors: []
+    property double lastRefreshMs: 0
+
+    signal itemsChanged()
+
+    Component.onCompleted: {
+        loadSettings();
+        refresh();
+    }
+
+    function loadSettings() {
+        if (!pluginService)
+            return;
+        trigger = pluginService.loadPluginData(pluginName, "trigger", "agent:");
+        hosts = pluginService.loadPluginData(pluginName, "hosts", "");
+        terminal = pluginService.loadPluginData(
+            pluginName,
+            "terminal",
+            Quickshell.env("TERMINAL") || "ghostty"
+        );
+        maxSessions = boundedInteger(
+            pluginService.loadPluginData(pluginName, "max_sessions", 20),
+            1,
+            100,
+            20
+        );
+        refreshSeconds = boundedInteger(
+            pluginService.loadPluginData(pluginName, "refresh_seconds", 15),
+            5,
+            300,
+            15
+        );
+        refreshTimer.interval = refreshSeconds * 1000;
+    }
+
+    function boundedInteger(value, minimum, maximum, fallback) {
+        const parsed = parseInt(value);
+        if (isNaN(parsed))
+            return fallback;
+        return Math.max(minimum, Math.min(maximum, parsed));
+    }
+
+    function configuredHosts() {
+        return hosts
+            .split(/[\s,]+/)
+            .map(host => host.trim())
+            .filter(host => host.length > 0);
+    }
+
+    function refresh() {
+        if (listProcess.running)
+            return;
+        const command = [helper, "list", "--limit", String(maxSessions)];
+        for (const host of configuredHosts())
+            command.push("--host", host);
+        listProcess.command = command;
+        listProcess.running = true;
+    }
+
+    function applyResult(text) {
+        try {
+            const result = JSON.parse(text);
+            sessions = Array.isArray(result.sessions) ? result.sessions : [];
+            errors = Array.isArray(result.errors) ? result.errors : [];
+            lastRefreshMs = Date.now();
+            itemsChanged();
+        } catch (error) {
+            console.warn(pluginName + ": invalid helper output: " + String(error));
+        }
+    }
+
+    function shortenedPath(path) {
+        const home = Quickshell.env("HOME");
+        if (path === home)
+            return "~";
+        if (home && path.startsWith(home + "/"))
+            return "~/" + path.slice(home.length + 1);
+        return path || "~";
+    }
+
+    function age(timestamp) {
+        if (!timestamp)
+            return "unknown";
+        const seconds = Math.max(0, Math.floor(Date.now() / 1000) - timestamp);
+        if (seconds < 60)
+            return "now";
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60)
+            return minutes + "m";
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24)
+            return hours + "h";
+        const days = Math.floor(hours / 24);
+        if (days < 30)
+            return days + "d";
+        return Math.floor(days / 30) + "mo";
+    }
+
+    function matches(session, query) {
+        if (!query)
+            return true;
+        const haystack = [
+            session.name,
+            session.host,
+            session.connectHost,
+            session.cwd,
+            session.active ? "active" : "idle"
+        ].join(" ").toLowerCase();
+        return haystack.includes(query.toLowerCase());
+    }
+
+    function getItems(query) {
+        if (!listProcess.running && Date.now() - lastRefreshMs > refreshSeconds * 1000)
+            refresh();
+
+        const items = [];
+        let index = 0;
+        for (const session of sessions) {
+            if (!matches(session, query))
+                continue;
+            const state = session.active ? "Active" : "Idle";
+            items.push({
+                name: session.name,
+                icon: session.active ? "material:terminal" : "material:history",
+                comment: state + " | " + session.host + " | "
+                    + shortenedPath(session.cwd) + " | " + age(session.recencyAt),
+                action: "agent:" + session.host + ":" + session.id,
+                categories: ["Agent Sessions"],
+                _preScored: 2000 - index,
+                _connectHost: session.connectHost,
+                _threadId: session.id,
+                _name: session.name,
+                _cwd: session.cwd
+            });
+            index += 1;
+        }
+        return items;
+    }
+
+    function executeItem(item) {
+        if (!item || !item._threadId)
+            return;
+        Quickshell.execDetached([
+            helper,
+            "open",
+            "--host", item._connectHost,
+            "--id", item._threadId,
+            "--name", item._name,
+            "--cwd", item._cwd,
+            "--terminal", terminal
+        ]);
+    }
+
+    Timer {
+        id: refreshTimer
+        interval: root.refreshSeconds * 1000
+        repeat: true
+        running: true
+        onTriggered: root.refresh()
+    }
+
+    Process {
+        id: listProcess
+        running: false
+
+        onExited: exitCode => {
+            if (exitCode !== 0)
+                console.warn(root.pluginName + ": helper exited with " + exitCode);
+        }
+
+        stdout: StdioCollector {
+            onStreamFinished: root.applyResult(text)
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: {
+                if (text.trim().length > 0)
+                    console.warn(root.pluginName + ": " + text.trim());
+            }
+        }
+    }
+}
