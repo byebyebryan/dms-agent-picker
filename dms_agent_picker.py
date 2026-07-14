@@ -706,15 +706,26 @@ def _safe_tmux_name(name: str, thread_id: str) -> str:
     return cleaned[:48] or f"codex-{thread_id[:8]}"
 
 
+def _tmux_client_wait_script() -> str:
+    return (
+        'while :; do attached=$(tmux display-message -p -t "$TMUX_PANE" '
+        '"#{session_attached}" 2>/dev/null || true); '
+        'case "$attached" in ""|0) sleep 0.05 ;; *) break ;; esac; done; '
+        'sleep 0.05; exec "$@"'
+    )
+
+
 def _ensure_session_script(thread_id: str, name: str, cwd: str) -> str:
     base = _safe_tmux_name(name, thread_id)
     short_id = thread_id[:8]
+    wait_script = _tmux_client_wait_script()
     return f"""set -eu
 thread_id={shlex.quote(thread_id)}
 display_name={shlex.quote(name)}
 requested_cwd={shlex.quote(cwd)}
 base={shlex.quote(base)}
 short_id={shlex.quote(short_id)}
+wait_script={shlex.quote(wait_script)}
 codex_bin=$(command -v codex)
 if [ -z "$requested_cwd" ] || [ ! -d "$requested_cwd" ]; then
     requested_cwd=$HOME
@@ -729,7 +740,7 @@ while tmux has-session -t "=$candidate" 2>/dev/null; do
         candidate="${{base}}-${{short_id}}-$counter"
     fi
 done
-codex_command="exec \"$codex_bin\" resume \"$thread_id\""
+codex_command="exec sh -c '$wait_script' sh \"$codex_bin\" resume \"$thread_id\""
 tmux new-session -d -s "$candidate" -c "$requested_cwd"
 tmux set-option -t "$candidate" @codex_thread_id "$thread_id"
 tmux set-option -t "$candidate" @codex_name "$display_name"
@@ -799,8 +810,10 @@ def resolve_open_target(
 
 
 def _ensure_claude_session_script() -> str:
+    wait_script = _tmux_client_wait_script()
     return f"""set -eu
 session={shlex.quote(CLAUDE_TMUX_SESSION)}
+wait_script={shlex.quote(wait_script)}
 claude_bin=$(command -v claude || true)
 if [ -z "$claude_bin" ]; then
     printf '%s\n' 'claude is not installed' >&2
@@ -814,7 +827,7 @@ workspace_cwd=$HOME/code
 if [ ! -d "$workspace_cwd" ]; then
     workspace_cwd=$HOME
 fi
-claude_command="exec \"$claude_bin\" --resume"
+claude_command="exec sh -c '$wait_script' sh \"$claude_bin\" --resume"
 tmux new-session -d -s "$session" -c "$workspace_cwd" "$claude_command"
 tmux set-option -t "$session" @agent_workspace claude
 printf '%s\n' "$session"

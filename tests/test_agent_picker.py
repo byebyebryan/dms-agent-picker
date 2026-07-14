@@ -262,6 +262,20 @@ class TmuxNameTest(unittest.TestCase):
             picker._safe_tmux_name("project:name.test", THREAD_A),
         )
 
+    def test_agent_start_waits_for_attached_tmux_client(self) -> None:
+        wait_script = picker._tmux_client_wait_script()
+
+        self.assertIn("$TMUX_PANE", wait_script)
+        self.assertIn("#{session_attached}", wait_script)
+        self.assertIn('exec "$@"', wait_script)
+
+        codex_script = picker._ensure_session_script(
+            THREAD_A, "project", "/home/test/code/project"
+        )
+        claude_script = picker._ensure_claude_session_script()
+        self.assertIn("codex_command=\"exec sh -c '$wait_script'", codex_script)
+        self.assertIn("claude_command=\"exec sh -c '$wait_script'", claude_script)
+
     def test_remote_attach_quotes_exact_target_for_zsh(self) -> None:
         self.assertEqual(
             "exec tmux -u attach-session -t '=desktop-config'",

@@ -82,7 +82,9 @@ dms-agent-picker open-claude --host laptop.lan
 
 If the session is active in tmux, the picker attaches to that tmux session. If
 it is inactive, the picker creates a tmux session in the recorded working
-directory and runs `codex resume` with the session UUID.
+directory and runs `codex resume` with the session UUID. New agent processes
+wait for the terminal to attach before startup so terminal capability and color
+probes reach the actual terminal.
 
 For Claude Code, the picker adopts any existing Claude process running in tmux,
 regardless of that tmux session's name. Otherwise it creates the canonical
