@@ -614,11 +614,18 @@ def _terminal_command(terminal: str, inner: list[str]) -> list[str]:
     return command + inner
 
 
+def _remote_attach_command(session: str) -> str:
+    # zsh expands an unquoted leading "=" as a command path. tmux uses it to
+    # request an exact session-name match, so force quotes even for safe names.
+    target = "'" + f"={session}".replace("'", "'\"'\"'") + "'"
+    return "exec tmux attach-session -t " + target
+
+
 def launch_attach(target: HostTarget, session: str, terminal: str, timeout: float) -> None:
     if target.connect_host is None:
         inner = ["tmux", "attach-session", "-t", f"={session}"]
     else:
-        remote_command = "exec tmux attach-session -t " + shlex.quote(f"={session}")
+        remote_command = _remote_attach_command(session)
         inner = _ssh_prefix(timeout) + ["-t", target.connect_host, remote_command]
 
     command = _terminal_command(terminal, inner)

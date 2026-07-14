@@ -117,6 +117,12 @@ class TmuxNameTest(unittest.TestCase):
             picker._safe_tmux_name("project:name.test", THREAD_A),
         )
 
+    def test_remote_attach_quotes_exact_target_for_zsh(self) -> None:
+        self.assertEqual(
+            "exec tmux attach-session -t '=desktop-config'",
+            picker._remote_attach_command("desktop-config"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
