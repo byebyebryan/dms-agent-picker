@@ -124,5 +124,30 @@ class TmuxNameTest(unittest.TestCase):
         )
 
 
+class NiriWindowTest(unittest.TestCase):
+    def test_matches_exact_session_and_short_hostname(self) -> None:
+        windows = [
+            {
+                "id": 42,
+                "title": "desktop-config:0 codex | bryan @ 80H1VV3",
+            }
+        ]
+
+        self.assertEqual(
+            42,
+            picker._matching_niri_window_id(windows, "desktop-config", "80h1vv3.lan"),
+        )
+
+    def test_rejects_same_session_on_another_host(self) -> None:
+        windows = [
+            {
+                "id": 42,
+                "title": "cubey:0 codex | cubey @ starship",
+            }
+        ]
+
+        self.assertIsNone(picker._matching_niri_window_id(windows, "cubey", "carbon"))
+
+
 if __name__ == "__main__":
     unittest.main()

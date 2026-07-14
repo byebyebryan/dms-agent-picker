@@ -623,6 +623,63 @@ def _remote_attach_command(session: str) -> str:
     return "exec tmux -u attach-session -t " + target
 
 
+def _short_hostname(host: str) -> str:
+    return host.rstrip(".").split(".", 1)[0].casefold()
+
+
+def _matching_niri_window_id(
+    windows: Sequence[object], session: str, host: str
+) -> int | None:
+    session_prefix = f"{session}:"
+    expected_host = _short_hostname(host)
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        title = window.get("title")
+        window_id = window.get("id")
+        if not isinstance(title, str) or not isinstance(window_id, int):
+            continue
+        if not title.startswith(session_prefix) or " @ " not in title:
+            continue
+        title_host = title.rsplit(" @ ", 1)[1]
+        if _short_hostname(title_host) == expected_host:
+            return window_id
+    return None
+
+
+def focus_existing_window(session: str, host: str, timeout: float) -> bool:
+    niri = shutil.which("niri")
+    if not niri or not os.environ.get("NIRI_SOCKET"):
+        return False
+    command_timeout = min(max(timeout, 0.5), 2.0)
+    try:
+        result = subprocess.run(
+            [niri, "msg", "--json", "windows"],
+            capture_output=True,
+            text=True,
+            timeout=command_timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        windows = json.loads(result.stdout)
+        if not isinstance(windows, list):
+            return False
+        window_id = _matching_niri_window_id(windows, session, host)
+        if window_id is None:
+            return False
+        focused = subprocess.run(
+            [niri, "msg", "action", "focus-window", "--id", str(window_id)],
+            capture_output=True,
+            text=True,
+            timeout=command_timeout,
+            check=False,
+        )
+        return focused.returncode == 0
+    except (json.JSONDecodeError, OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def launch_attach(target: HostTarget, session: str, terminal: str, timeout: float) -> None:
     if target.connect_host is None:
         inner = ["tmux", "attach-session", "-t", f"={session}"]
@@ -666,6 +723,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     open_parser = subparsers.add_parser("open", help="open or resume a Codex session")
     open_parser.add_argument("--host", default="local")
+    open_parser.add_argument("--window-host")
     open_parser.add_argument("--id", required=True, type=_valid_thread_id)
     open_parser.add_argument("--name")
     open_parser.add_argument("--cwd")
@@ -695,6 +753,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         target = HostTarget(None if args.host in {"", "local"} else args.host)
         session = resolve_open_target(target, args.id, args.name, args.cwd, args.timeout)
+        window_host = args.window_host or target.connect_host or socket.gethostname()
+        if focus_existing_window(session, window_host, args.timeout):
+            return 0
         launch_attach(target, session, args.terminal, args.timeout)
         return 0
     except PickerError as exc:

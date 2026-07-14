@@ -61,6 +61,10 @@ If the session is active in tmux, the picker attaches to that tmux session. If
 it is inactive, the picker creates a tmux session in the recorded working
 directory and runs `codex resume` with the session UUID.
 
+Under niri, the picker first focuses an existing terminal window attached to
+the same host and tmux session. It opens a new terminal only when no matching
+window is present.
+
 ## Test
 
 ```sh

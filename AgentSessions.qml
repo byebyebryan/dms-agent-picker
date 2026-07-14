@@ -144,6 +144,7 @@ Item {
                 categories: ["Agent Sessions"],
                 _preScored: 2000 - index,
                 _connectHost: session.connectHost,
+                _windowHost: session.host,
                 _threadId: session.id,
                 _name: session.name,
                 _cwd: session.cwd
@@ -160,6 +161,7 @@ Item {
             helper,
             "open",
             "--host", item._connectHost,
+            "--window-host", item._windowHost,
             "--id", item._threadId,
             "--name", item._name,
             "--cwd", item._cwd,
