@@ -17,6 +17,7 @@ Item {
     property int refreshSeconds: 15
     property int sshConnectTimeout: 2
     property int sshConnectionAttempts: 1
+    property var workspaces: []
     property var sessions: []
     property var errors: []
     property double lastRefreshMs: 0
@@ -107,6 +108,7 @@ Item {
     function applyResult(text) {
         try {
             const result = JSON.parse(text);
+            workspaces = Array.isArray(result.workspaces) ? result.workspaces : [];
             sessions = Array.isArray(result.sessions) ? result.sessions : [];
             errors = Array.isArray(result.errors) ? result.errors : [];
             lastRefreshMs = Date.now();
@@ -143,16 +145,17 @@ Item {
         return Math.floor(days / 30) + "mo";
     }
 
-    function matches(session, query) {
+    function matches(agent, query) {
         if (!query)
             return true;
         const haystack = [
-            session.name,
-            session.host,
-            session.connectHost,
-            session.windowHost,
-            session.cwd,
-            session.active ? "active" : "idle"
+            agent.kind,
+            agent.name,
+            agent.host,
+            agent.connectHost,
+            agent.windowHost,
+            agent.cwd,
+            agent.active ? "active" : "idle"
         ].join(" ").toLowerCase();
         return haystack.includes(query.toLowerCase());
     }
@@ -163,6 +166,24 @@ Item {
 
         const items = [];
         let index = 0;
+        for (const workspace of workspaces) {
+            if (!matches(workspace, query))
+                continue;
+            items.push({
+                name: workspace.name,
+                icon: workspace.active ? "material:terminal" : "material:history",
+                comment: workspace.host,
+                action: "agent:" + workspace.host + ":claude",
+                categories: ["Agent Sessions"],
+                _preScored: 3000 - index,
+                _kind: "claude",
+                _connectHost: workspace.connectHost,
+                _windowHost: workspace.windowHost || workspace.host
+            });
+            index += 1;
+        }
+
+        index = 0;
         for (const session of sessions) {
             if (!matches(session, query))
                 continue;
@@ -174,6 +195,7 @@ Item {
                 action: "agent:" + session.host + ":" + session.id,
                 categories: ["Agent Sessions"],
                 _preScored: 2000 - index,
+                _kind: "codex",
                 _connectHost: session.connectHost,
                 _windowHost: session.windowHost || session.host,
                 _threadId: session.id,
@@ -186,7 +208,21 @@ Item {
     }
 
     function executeItem(item) {
-        if (!item || !item._threadId)
+        if (!item)
+            return;
+        if (item._kind === "claude") {
+            Quickshell.execDetached([
+                helper,
+                "--ssh-connect-timeout", String(sshConnectTimeout),
+                "--ssh-connection-attempts", String(sshConnectionAttempts),
+                "open-claude",
+                "--host", item._connectHost,
+                "--window-host", item._windowHost,
+                "--terminal", terminal
+            ]);
+            return;
+        }
+        if (!item._threadId)
             return;
         Quickshell.execDetached([
             helper,

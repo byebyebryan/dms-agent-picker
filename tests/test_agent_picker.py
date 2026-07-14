@@ -77,6 +77,61 @@ class MergeHostResultsTest(unittest.TestCase):
         self.assertFalse(result["sessions"][0]["active"])
         self.assertEqual("active", result["errors"][0]["stage"])
 
+    def test_claude_workspace_survives_codex_list_failure(self) -> None:
+        result = picker.merge_host_results(
+            [
+                (
+                    picker.HostTarget("snap.lan"),
+                    picker.PickerError("codex unavailable"),
+                    {
+                        "host": "80H1VV3",
+                        "active": {},
+                        "claude": {
+                            "installed": True,
+                            "running": True,
+                            "tmuxSession": "caos",
+                        },
+                    },
+                )
+            ],
+            limit=20,
+            aliases={"80h1vv3": "snap"},
+        )
+
+        self.assertEqual([], result["sessions"])
+        self.assertEqual(
+            {
+                "kind": "claude",
+                "id": "claude-code",
+                "name": "Claude Code",
+                "host": "snap",
+                "windowHost": "80H1VV3",
+                "connectHost": "snap.lan",
+                "active": True,
+                "tmuxSession": "caos",
+            },
+            result["workspaces"][0],
+        )
+        self.assertEqual("threads", result["errors"][0]["stage"])
+
+    def test_unavailable_claude_workspace_is_omitted(self) -> None:
+        result = picker.merge_host_results(
+            [
+                (
+                    picker.HostTarget(None),
+                    [],
+                    {
+                        "host": "desktop",
+                        "active": {},
+                        "claude": {"installed": False, "running": False},
+                    },
+                )
+            ],
+            limit=20,
+        )
+
+        self.assertEqual([], result["workspaces"])
+
 
 class OpenTargetTest(unittest.TestCase):
     def test_active_tmux_session_is_reused(self) -> None:
@@ -109,6 +164,95 @@ class OpenTargetTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(picker.PickerError, "outside tmux"):
                 picker.resolve_open_target(picker.HostTarget(None), THREAD_A, "cubey", "/tmp", 1.0)
+
+
+class ClaudeWorkspaceTest(unittest.TestCase):
+    def test_snapshot_adopts_existing_claude_tmux_session(self) -> None:
+        with mock.patch.object(picker.shutil, "which", return_value="/usr/bin/claude"):
+            snapshot = picker._claude_snapshot(
+                parents={300: 200, 200: 1},
+                claude_pids={300},
+                pane_sessions={200: "caos"},
+            )
+
+        self.assertTrue(snapshot["installed"])
+        self.assertTrue(snapshot["running"])
+        self.assertEqual("caos", snapshot["tmuxSession"])
+
+    def test_snapshot_prefers_managed_session_when_multiple_exist(self) -> None:
+        with mock.patch.object(picker.shutil, "which", return_value="/usr/bin/claude"):
+            snapshot = picker._claude_snapshot(
+                parents={300: 200, 500: 400},
+                claude_pids={300, 500},
+                pane_sessions={200: "caos", 400: "claude-code"},
+            )
+
+        self.assertEqual("claude-code", snapshot["tmuxSession"])
+        self.assertEqual(["caos", "claude-code"], snapshot["tmuxSessions"])
+
+    def test_open_reuses_existing_claude_tmux_session(self) -> None:
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "80H1VV3",
+                    "active": {},
+                    "claude": {
+                        "installed": True,
+                        "running": True,
+                        "tmuxSession": "caos",
+                    },
+                },
+            ),
+            mock.patch.object(picker, "ensure_claude_tmux_session") as ensure,
+        ):
+            session = picker.resolve_claude_open_target(
+                picker.HostTarget("snap.lan"), 1.0
+            )
+
+        self.assertEqual("caos", session)
+        ensure.assert_not_called()
+
+    def test_active_claude_outside_tmux_is_not_duplicated(self) -> None:
+        with mock.patch.object(
+            picker,
+            "get_active_snapshot",
+            return_value={
+                "host": "desktop",
+                "active": {},
+                "claude": {"installed": True, "running": True, "tmuxSession": None},
+            },
+        ):
+            with self.assertRaisesRegex(picker.PickerError, "outside tmux"):
+                picker.resolve_claude_open_target(picker.HostTarget(None), 1.0)
+
+    def test_inactive_claude_creates_managed_session(self) -> None:
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "desktop",
+                    "active": {},
+                    "claude": {"installed": True, "running": False, "tmuxSession": None},
+                },
+            ),
+            mock.patch.object(
+                picker, "ensure_claude_tmux_session", return_value="claude-code"
+            ) as ensure,
+        ):
+            session = picker.resolve_claude_open_target(picker.HostTarget(None), 1.0)
+
+        self.assertEqual("claude-code", session)
+        ensure.assert_called_once()
+
+    def test_managed_session_starts_in_code_and_opens_resume_picker(self) -> None:
+        script = picker._ensure_claude_session_script()
+
+        self.assertIn("workspace_cwd=$HOME/code", script)
+        self.assertIn('--resume', script)
+        self.assertIn('@agent_workspace claude', script)
 
 
 class TmuxNameTest(unittest.TestCase):
