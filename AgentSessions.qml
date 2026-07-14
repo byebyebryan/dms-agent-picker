@@ -135,12 +135,11 @@ Item {
         for (const session of sessions) {
             if (!matches(session, query))
                 continue;
-            const state = session.active ? "Active" : "Idle";
             items.push({
                 name: session.name,
                 icon: session.active ? "material:terminal" : "material:history",
-                comment: state + " | " + session.host + " | "
-                    + shortenedPath(session.cwd) + " | " + age(session.recencyAt),
+                comment: session.host + " | " + shortenedPath(session.cwd)
+                    + " | " + age(session.recencyAt),
                 action: "agent:" + session.host + ":" + session.id,
                 categories: ["Agent Sessions"],
                 _preScored: 2000 - index,

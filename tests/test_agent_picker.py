@@ -119,7 +119,7 @@ class TmuxNameTest(unittest.TestCase):
 
     def test_remote_attach_quotes_exact_target_for_zsh(self) -> None:
         self.assertEqual(
-            "exec tmux attach-session -t '=desktop-config'",
+            "exec tmux -u attach-session -t '=desktop-config'",
             picker._remote_attach_command("desktop-config"),
         )
 

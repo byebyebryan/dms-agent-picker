@@ -618,7 +618,9 @@ def _remote_attach_command(session: str) -> str:
     # zsh expands an unquoted leading "=" as a command path. tmux uses it to
     # request an exact session-name match, so force quotes even for safe names.
     target = "'" + f"={session}".replace("'", "'\"'\"'") + "'"
-    return "exec tmux attach-session -t " + target
+    # Noninteractive SSH commands may have no locale; force a UTF-8 client so
+    # tmux does not replace Unicode cells with underscores while attaching.
+    return "exec tmux -u attach-session -t " + target
 
 
 def launch_attach(target: HostTarget, session: str, terminal: str, timeout: float) -> None:
