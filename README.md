@@ -37,6 +37,10 @@ local host is always included and is skipped when it also appears in the shared
 SSH host list. Optional aliases use `source=display` syntax, for example
 `80h1vv3=snap`.
 
+SSH connection timeout and retry count are configurable. Their defaults are a
+2-second connection timeout and one connection attempt; batch mode is always
+enabled to prevent interactive authentication prompts.
+
 Session data is refreshed asynchronously when the picker is queried and its
 cache is stale. The plugin does not poll SSH hosts while the picker is closed.
 

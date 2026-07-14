@@ -151,6 +151,22 @@ class NiriWindowTest(unittest.TestCase):
 
 
 class HostConfigTest(unittest.TestCase):
+    def test_ssh_policy_builds_noninteractive_bounded_prefix(self) -> None:
+        self.assertEqual(
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=2",
+                "-o",
+                "ConnectionAttempts=1",
+                "-o",
+                "LogLevel=ERROR",
+            ],
+            picker._ssh_prefix(picker.SshPolicy()),
+        )
+
     def test_parses_case_insensitive_alias_source(self) -> None:
         self.assertEqual(
             {"80h1vv3": "snap"},

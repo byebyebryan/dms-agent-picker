@@ -15,6 +15,8 @@ Item {
     property string terminal: Quickshell.env("TERMINAL") || "ghostty"
     property int maxSessions: 20
     property int refreshSeconds: 15
+    property int sshConnectTimeout: 2
+    property int sshConnectionAttempts: 1
     property var sessions: []
     property var errors: []
     property double lastRefreshMs: 0
@@ -46,6 +48,18 @@ Item {
             300,
             15
         );
+        sshConnectTimeout = boundedInteger(
+            pluginService.loadPluginData(pluginName, "ssh_connect_timeout", 2),
+            1,
+            30,
+            2
+        );
+        sshConnectionAttempts = boundedInteger(
+            pluginService.loadPluginData(pluginName, "ssh_connection_attempts", 1),
+            1,
+            5,
+            1
+        );
     }
 
     function boundedInteger(value, minimum, maximum, fallback) {
@@ -72,7 +86,13 @@ Item {
     function refresh() {
         if (listProcess.running)
             return;
-        const command = [helper, "list", "--limit", String(maxSessions)];
+        const command = [
+            helper,
+            "--ssh-connect-timeout", String(sshConnectTimeout),
+            "--ssh-connection-attempts", String(sshConnectionAttempts),
+            "list",
+            "--limit", String(maxSessions)
+        ];
         for (const host of configuredHosts())
             command.push("--host", host);
         for (const alias of configuredAliases())
@@ -167,6 +187,8 @@ Item {
             return;
         Quickshell.execDetached([
             helper,
+            "--ssh-connect-timeout", String(sshConnectTimeout),
+            "--ssh-connection-attempts", String(sshConnectionAttempts),
             "open",
             "--host", item._connectHost,
             "--window-host", item._windowHost,

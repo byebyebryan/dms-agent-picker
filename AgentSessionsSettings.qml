@@ -60,4 +60,20 @@ PluginSettings {
         placeholder: "15"
         defaultValue: "15"
     }
+
+    StringSetting {
+        settingKey: "ssh_connect_timeout"
+        label: "SSH Connect Timeout"
+        description: "Seconds allowed to establish each SSH connection"
+        placeholder: "2"
+        defaultValue: "2"
+    }
+
+    StringSetting {
+        settingKey: "ssh_connection_attempts"
+        label: "SSH Connection Attempts"
+        description: "Connection attempts before treating a host as unavailable"
+        placeholder: "1"
+        defaultValue: "1"
+    }
 }

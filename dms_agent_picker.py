@@ -22,6 +22,8 @@ from typing import Any, Mapping, Sequence
 
 DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = 4.0
+DEFAULT_SSH_CONNECT_TIMEOUT = 2
+DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -39,6 +41,15 @@ class HostTarget:
     @property
     def key(self) -> str:
         return self.connect_host or "local"
+
+
+@dataclass(frozen=True)
+class SshPolicy:
+    connect_timeout: int = DEFAULT_SSH_CONNECT_TIMEOUT
+    connection_attempts: int = DEFAULT_SSH_CONNECTION_ATTEMPTS
+
+
+DEFAULT_SSH_POLICY = SshPolicy()
 
 
 def _short_hostname(host: str) -> str:
@@ -186,29 +197,36 @@ class AppServerClient:
         self.close()
 
 
-def _ssh_prefix(timeout: float) -> list[str]:
+def _ssh_prefix(policy: SshPolicy) -> list[str]:
     return [
         "ssh",
         "-o",
         "BatchMode=yes",
         "-o",
-        f"ConnectTimeout={max(1, int(timeout))}",
+        f"ConnectTimeout={policy.connect_timeout}",
+        "-o",
+        f"ConnectionAttempts={policy.connection_attempts}",
         "-o",
         "LogLevel=ERROR",
     ]
 
 
-def _app_server_command(target: HostTarget, timeout: float) -> list[str]:
+def _app_server_command(target: HostTarget, ssh_policy: SshPolicy) -> list[str]:
     if target.connect_host is None:
         codex = shutil.which("codex")
         if not codex:
             raise PickerError("codex is not installed")
         return [codex, "app-server", "--stdio"]
-    return _ssh_prefix(timeout) + [target.connect_host, "codex app-server --stdio"]
+    return _ssh_prefix(ssh_policy) + [target.connect_host, "codex app-server --stdio"]
 
 
-def list_codex_threads(target: HostTarget, limit: int, timeout: float) -> list[dict[str, Any]]:
-    with AppServerClient(_app_server_command(target, timeout), timeout) as client:
+def list_codex_threads(
+    target: HostTarget,
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> list[dict[str, Any]]:
+    with AppServerClient(_app_server_command(target, ssh_policy), timeout) as client:
         client.initialize()
         result = client.call(
             "thread/list",
@@ -226,8 +244,13 @@ def list_codex_threads(target: HostTarget, limit: int, timeout: float) -> list[d
     return [item for item in result["data"] if isinstance(item, dict)]
 
 
-def read_codex_thread(target: HostTarget, thread_id: str, timeout: float) -> dict[str, Any]:
-    with AppServerClient(_app_server_command(target, timeout), timeout) as client:
+def read_codex_thread(
+    target: HostTarget,
+    thread_id: str,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
+    with AppServerClient(_app_server_command(target, ssh_policy), timeout) as client:
         client.initialize()
         result = client.call("thread/read", {"threadId": thread_id, "includeTurns": False})
     thread = result.get("thread") if isinstance(result, dict) else None
@@ -413,10 +436,14 @@ print(json.dumps({"host": socket.gethostname(), "active": active}, separators=("
 """
 
 
-def remote_active_snapshot(host: str, timeout: float) -> dict[str, Any]:
+def remote_active_snapshot(
+    host: str,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
     try:
         result = subprocess.run(
-            _ssh_prefix(timeout) + [host, "python3 -"],
+            _ssh_prefix(ssh_policy) + [host, "python3 -"],
             input=ACTIVE_PROBE,
             capture_output=True,
             text=True,
@@ -436,10 +463,14 @@ def remote_active_snapshot(host: str, timeout: float) -> dict[str, Any]:
     return payload
 
 
-def get_active_snapshot(target: HostTarget, timeout: float) -> dict[str, Any]:
+def get_active_snapshot(
+    target: HostTarget,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
     if target.connect_host is None:
         return active_snapshot()
-    return remote_active_snapshot(target.connect_host, timeout)
+    return remote_active_snapshot(target.connect_host, timeout, ssh_policy)
 
 
 def merge_host_results(
@@ -512,6 +543,7 @@ def aggregate_sessions(
     timeout: float,
     include_local: bool = True,
     aliases: Mapping[str, str] | None = None,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> dict[str, Any]:
     aliases = aliases or {}
     targets: list[HostTarget] = []
@@ -532,11 +564,12 @@ def aggregate_sessions(
     workers = max(1, min(12, len(targets) * 2))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         thread_futures = {
-            target.key: pool.submit(list_codex_threads, target, limit, timeout)
+            target.key: pool.submit(list_codex_threads, target, limit, timeout, ssh_policy)
             for target in targets
         }
         active_futures = {
-            target.key: pool.submit(get_active_snapshot, target, timeout) for target in targets
+            target.key: pool.submit(get_active_snapshot, target, timeout, ssh_policy)
+            for target in targets
         }
         for target in targets:
             try:
@@ -593,12 +626,17 @@ printf '%s\n' "$candidate"
 
 
 def ensure_tmux_session(
-    target: HostTarget, thread_id: str, name: str, cwd: str, timeout: float
+    target: HostTarget,
+    thread_id: str,
+    name: str,
+    cwd: str,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> str:
     script = _ensure_session_script(thread_id, name, cwd)
     command = ["sh", "-lc", script]
     if target.connect_host is not None:
-        command = _ssh_prefix(timeout) + [
+        command = _ssh_prefix(ssh_policy) + [
             target.connect_host,
             "sh -lc " + shlex.quote(script),
         ]
@@ -623,8 +661,9 @@ def resolve_open_target(
     name: str | None,
     cwd: str | None,
     timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> str:
-    snapshot = get_active_snapshot(target, timeout)
+    snapshot = get_active_snapshot(target, timeout, ssh_policy)
     active_info = snapshot.get("active", {}).get(thread_id)
     if isinstance(active_info, dict):
         tmux_session = active_info.get("tmuxSession")
@@ -633,10 +672,17 @@ def resolve_open_target(
         raise PickerError(f"Codex session {thread_id[:8]} is active on {target.key} outside tmux")
 
     if not name or cwd is None:
-        thread = read_codex_thread(target, thread_id, timeout)
+        thread = read_codex_thread(target, thread_id, timeout, ssh_policy)
         name = name or str(thread.get("name") or "")
         cwd = cwd if cwd is not None else str(thread.get("cwd") or "")
-    return ensure_tmux_session(target, thread_id, name or "codex", cwd or "", timeout)
+    return ensure_tmux_session(
+        target,
+        thread_id,
+        name or "codex",
+        cwd or "",
+        timeout,
+        ssh_policy,
+    )
 
 
 def _terminal_command(terminal: str, inner: list[str]) -> list[str]:
@@ -714,12 +760,17 @@ def focus_existing_window(session: str, host: str, timeout: float) -> bool:
         return False
 
 
-def launch_attach(target: HostTarget, session: str, terminal: str, timeout: float) -> None:
+def launch_attach(
+    target: HostTarget,
+    session: str,
+    terminal: str,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> None:
     if target.connect_host is None:
         inner = ["tmux", "attach-session", "-t", f"={session}"]
     else:
         remote_command = _remote_attach_command(session)
-        inner = _ssh_prefix(timeout) + ["-t", target.connect_host, remote_command]
+        inner = _ssh_prefix(ssh_policy) + ["-t", target.connect_host, remote_command]
 
     command = _terminal_command(terminal, inner)
     systemd_run = shutil.which("systemd-run")
@@ -745,6 +796,16 @@ def _valid_thread_id(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--ssh-connect-timeout",
+        type=int,
+        default=DEFAULT_SSH_CONNECT_TIMEOUT,
+    )
+    parser.add_argument(
+        "--ssh-connection-attempts",
+        type=int,
+        default=DEFAULT_SSH_CONNECTION_ATTEMPTS,
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list", help="list recent Codex sessions as JSON")
@@ -775,6 +836,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.timeout <= 0:
+            raise PickerError("timeout must be positive")
+        if args.ssh_connect_timeout < 1 or args.ssh_connect_timeout > 30:
+            raise PickerError("SSH connect timeout must be between 1 and 30 seconds")
+        if args.ssh_connection_attempts < 1 or args.ssh_connection_attempts > 5:
+            raise PickerError("SSH connection attempts must be between 1 and 5")
+        ssh_policy = SshPolicy(args.ssh_connect_timeout, args.ssh_connection_attempts)
+
         if args.command == "list":
             if args.limit < 1 or args.limit > 200:
                 raise PickerError("limit must be between 1 and 200")
@@ -785,6 +854,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.timeout,
                 include_local=not args.no_local,
                 aliases=aliases,
+                ssh_policy=ssh_policy,
             )
             print(json.dumps(payload, separators=(",", ":")))
             return 0
@@ -794,11 +864,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         target = HostTarget(None if args.host in {"", "local"} else args.host)
-        session = resolve_open_target(target, args.id, args.name, args.cwd, args.timeout)
+        session = resolve_open_target(
+            target,
+            args.id,
+            args.name,
+            args.cwd,
+            args.timeout,
+            ssh_policy,
+        )
         window_host = args.window_host or target.connect_host or socket.gethostname()
         if focus_existing_window(session, window_host, args.timeout):
             return 0
-        launch_attach(target, session, args.terminal, args.timeout)
+        launch_attach(target, session, args.terminal, ssh_policy)
         return 0
     except PickerError as exc:
         print(f"dms-agent-picker: {exc}", file=sys.stderr)
