@@ -35,6 +35,9 @@ dms ipc call plugins enable agentSessions
 Configure the launcher trigger and SSH hosts under DMS plugin settings. The
 local host is always included.
 
+Session data is refreshed asynchronously when the picker is queried and its
+cache is stale. The plugin does not poll SSH hosts while the picker is closed.
+
 ## CLI
 
 List the 20 most recently prompted sessions:

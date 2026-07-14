@@ -20,10 +20,7 @@ Item {
 
     signal itemsChanged()
 
-    Component.onCompleted: {
-        loadSettings();
-        refresh();
-    }
+    Component.onCompleted: loadSettings()
 
     function loadSettings() {
         if (!pluginService)
@@ -47,7 +44,6 @@ Item {
             300,
             15
         );
-        refreshTimer.interval = refreshSeconds * 1000;
     }
 
     function boundedInteger(value, minimum, maximum, fallback) {
@@ -167,14 +163,6 @@ Item {
             "--cwd", item._cwd,
             "--terminal", terminal
         ]);
-    }
-
-    Timer {
-        id: refreshTimer
-        interval: root.refreshSeconds * 1000
-        repeat: true
-        running: true
-        onTriggered: root.refresh()
     }
 
     Process {
