@@ -17,7 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 DEFAULT_LIMIT = 20
@@ -39,6 +39,26 @@ class HostTarget:
     @property
     def key(self) -> str:
         return self.connect_host or "local"
+
+
+def _short_hostname(host: str) -> str:
+    return host.rstrip(".").split(".", 1)[0].casefold()
+
+
+def parse_host_aliases(values: Sequence[str]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for value in values:
+        for entry in value.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            source, separator, display = entry.partition("=")
+            source = source.strip()
+            display = display.strip()
+            if not separator or not source or not display:
+                raise PickerError(f"invalid host alias {entry!r}; expected source=display")
+            aliases[_short_hostname(source)] = display
+    return aliases
 
 
 class AppServerClient:
@@ -427,7 +447,9 @@ def merge_host_results(
         tuple[HostTarget, list[dict[str, Any]] | Exception, dict[str, Any] | Exception]
     ],
     limit: int,
+    aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    aliases = aliases or {}
     sessions: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
@@ -443,6 +465,7 @@ def merge_host_results(
         else:
             canonical_host = str(active_result.get("host") or target.key)
             active_map = active_result.get("active", {})
+        display_host = aliases.get(_short_hostname(canonical_host), canonical_host)
 
         for thread in threads_result:
             thread_id = str(thread.get("id") or "").lower()
@@ -456,7 +479,8 @@ def merge_host_results(
                     "id": thread_id,
                     "name": name or Path(cwd).name or thread_id[:8],
                     "cwd": cwd,
-                    "host": canonical_host,
+                    "host": display_host,
+                    "windowHost": canonical_host,
                     "connectHost": target.key,
                     "recencyAt": int(thread.get("recencyAt") or 0),
                     "updatedAt": int(thread.get("updatedAt") or 0),
@@ -471,7 +495,7 @@ def merge_host_results(
     deduplicated: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for session in sessions:
-        key = (session["host"], session["id"])
+        key = (session["windowHost"], session["id"])
         if key in seen:
             continue
         seen.add(key)
@@ -483,12 +507,25 @@ def merge_host_results(
 
 
 def aggregate_sessions(
-    hosts: Sequence[str], limit: int, timeout: float, include_local: bool = True
+    hosts: Sequence[str],
+    limit: int,
+    timeout: float,
+    include_local: bool = True,
+    aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    aliases = aliases or {}
     targets: list[HostTarget] = []
     if include_local:
         targets.append(HostTarget(None))
-    targets.extend(HostTarget(host) for host in hosts if host.strip())
+    local_names = {_short_hostname(socket.gethostname())}
+    local_alias = aliases.get(_short_hostname(socket.gethostname()))
+    if local_alias:
+        local_names.add(_short_hostname(local_alias))
+    targets.extend(
+        HostTarget(host.strip())
+        for host in hosts
+        if host.strip() and _short_hostname(host.strip()) not in local_names
+    )
 
     thread_results: dict[str, list[dict[str, Any]] | Exception] = {}
     active_results: dict[str, dict[str, Any] | Exception] = {}
@@ -514,6 +551,7 @@ def aggregate_sessions(
     return merge_host_results(
         [(target, thread_results[target.key], active_results[target.key]) for target in targets],
         limit,
+        aliases,
     )
 
 
@@ -623,10 +661,6 @@ def _remote_attach_command(session: str) -> str:
     return "exec tmux -u attach-session -t " + target
 
 
-def _short_hostname(host: str) -> str:
-    return host.rstrip(".").split(".", 1)[0].casefold()
-
-
 def _matching_niri_window_id(
     windows: Sequence[object], session: str, host: str
 ) -> int | None:
@@ -715,6 +749,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     list_parser = subparsers.add_parser("list", help="list recent Codex sessions as JSON")
     list_parser.add_argument("--host", action="append", default=[])
+    list_parser.add_argument(
+        "--alias",
+        action="append",
+        default=[],
+        help="display hostname mapping in source=display form",
+    )
     list_parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     list_parser.add_argument("--no-local", action="store_true")
 
@@ -738,11 +778,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "list":
             if args.limit < 1 or args.limit > 200:
                 raise PickerError("limit must be between 1 and 200")
+            aliases = parse_host_aliases(args.alias)
             payload = aggregate_sessions(
                 args.host,
                 args.limit,
                 args.timeout,
                 include_local=not args.no_local,
+                aliases=aliases,
             )
             print(json.dumps(payload, separators=(",", ":")))
             return 0

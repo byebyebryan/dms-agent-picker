@@ -11,6 +11,7 @@ Item {
     property var pluginService: null
     property string trigger: "agent:"
     property string hosts: ""
+    property string aliases: ""
     property string terminal: Quickshell.env("TERMINAL") || "ghostty"
     property int maxSessions: 20
     property int refreshSeconds: 15
@@ -27,6 +28,7 @@ Item {
             return;
         trigger = pluginService.loadPluginData(pluginName, "trigger", "agent:");
         hosts = pluginService.loadPluginData(pluginName, "hosts", "");
+        aliases = pluginService.loadPluginData(pluginName, "aliases", "");
         terminal = pluginService.loadPluginData(
             pluginName,
             "terminal",
@@ -60,12 +62,21 @@ Item {
             .filter(host => host.length > 0);
     }
 
+    function configuredAliases() {
+        return aliases
+            .split(/[\s,]+/)
+            .map(alias => alias.trim())
+            .filter(alias => alias.length > 0);
+    }
+
     function refresh() {
         if (listProcess.running)
             return;
         const command = [helper, "list", "--limit", String(maxSessions)];
         for (const host of configuredHosts())
             command.push("--host", host);
+        for (const alias of configuredAliases())
+            command.push("--alias", alias);
         listProcess.command = command;
         listProcess.running = true;
     }
@@ -116,6 +127,7 @@ Item {
             session.name,
             session.host,
             session.connectHost,
+            session.windowHost,
             session.cwd,
             session.active ? "active" : "idle"
         ].join(" ").toLowerCase();
@@ -140,7 +152,7 @@ Item {
                 categories: ["Agent Sessions"],
                 _preScored: 2000 - index,
                 _connectHost: session.connectHost,
-                _windowHost: session.host,
+                _windowHost: session.windowHost || session.host,
                 _threadId: session.id,
                 _name: session.name,
                 _cwd: session.cwd

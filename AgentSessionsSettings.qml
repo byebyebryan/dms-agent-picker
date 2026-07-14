@@ -32,6 +32,14 @@ PluginSettings {
     }
 
     StringSetting {
+        settingKey: "aliases"
+        label: "Host Aliases"
+        description: "Comma-separated source=display mappings"
+        placeholder: "80h1vv3=snap"
+        defaultValue: ""
+    }
+
+    StringSetting {
         settingKey: "terminal"
         label: "Terminal"
         placeholder: Quickshell.env("TERMINAL") || "ghostty"

@@ -52,6 +52,7 @@ class MergeHostResultsTest(unittest.TestCase):
         self.assertTrue(result["sessions"][1]["active"])
         self.assertEqual("cubey", result["sessions"][1]["tmuxSession"])
         self.assertEqual("laptop.lan", result["sessions"][1]["connectHost"])
+        self.assertEqual("laptop", result["sessions"][1]["windowHost"])
 
     def test_remote_active_failure_keeps_sessions_idle(self) -> None:
         result = picker.merge_host_results(
@@ -147,6 +148,54 @@ class NiriWindowTest(unittest.TestCase):
         ]
 
         self.assertIsNone(picker._matching_niri_window_id(windows, "cubey", "carbon"))
+
+
+class HostConfigTest(unittest.TestCase):
+    def test_parses_case_insensitive_alias_source(self) -> None:
+        self.assertEqual(
+            {"80h1vv3": "snap"},
+            picker.parse_host_aliases(["80H1VV3=snap"]),
+        )
+
+    def test_rejects_invalid_alias(self) -> None:
+        with self.assertRaisesRegex(picker.PickerError, "expected source=display"):
+            picker.parse_host_aliases(["snap"])
+
+    def test_alias_changes_display_host_but_preserves_window_host(self) -> None:
+        result = picker.merge_host_results(
+            [
+                (
+                    picker.HostTarget("snap.lan"),
+                    [{"id": THREAD_A, "name": "dotfiles", "cwd": "/home/test"}],
+                    {"host": "80H1VV3", "active": {}},
+                )
+            ],
+            limit=20,
+            aliases={"80h1vv3": "snap"},
+        )
+
+        self.assertEqual("snap", result["sessions"][0]["host"])
+        self.assertEqual("80H1VV3", result["sessions"][0]["windowHost"])
+
+    def test_shared_host_list_skips_local_alias(self) -> None:
+        with (
+            mock.patch.object(picker.socket, "gethostname", return_value="80H1VV3"),
+            mock.patch.object(picker, "list_codex_threads", return_value=[]),
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={"host": "unused", "active": {}},
+            ) as active,
+        ):
+            picker.aggregate_sessions(
+                ["starship.lan", "snap.lan", "carbon.lan"],
+                limit=20,
+                timeout=1.0,
+                aliases={"80h1vv3": "snap"},
+            )
+
+        queried_hosts = {call.args[0].key for call in active.call_args_list}
+        self.assertEqual({"local", "starship.lan", "carbon.lan"}, queried_hosts)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,9 @@ dms ipc call plugins enable agentSessions
 ```
 
 Configure the launcher trigger and SSH hosts under DMS plugin settings. The
-local host is always included.
+local host is always included and is skipped when it also appears in the shared
+SSH host list. Optional aliases use `source=display` syntax, for example
+`80h1vv3=snap`.
 
 Session data is refreshed asynchronously when the picker is queried and its
 cache is stale. The plugin does not poll SSH hosts while the picker is closed.
