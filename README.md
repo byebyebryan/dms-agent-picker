@@ -28,7 +28,7 @@ Remote hosts:
 
 ```sh
 ./install.sh
-dms ipc call plugin-scan rescan
+dms ipc call plugin-scan scan
 dms ipc call plugins enable agentSessions
 ```
 
@@ -41,8 +41,9 @@ SSH connection timeout and retry count are configurable. Their defaults are a
 2-second connection timeout and one connection attempt; batch mode is always
 enabled to prevent interactive authentication prompts.
 
-Session data is refreshed asynchronously when the picker is queried and its
-cache is stale. The plugin does not poll SSH hosts while the picker is closed.
+Session data is preloaded once when the plugin starts, then refreshed
+asynchronously when the picker is queried and its cache is stale. The plugin
+does not poll SSH hosts continuously while the picker is closed.
 
 ## CLI
 

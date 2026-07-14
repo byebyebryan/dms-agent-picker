@@ -23,7 +23,10 @@ Item {
 
     signal itemsChanged()
 
-    Component.onCompleted: loadSettings()
+    Component.onCompleted: {
+        loadSettings();
+        refresh();
+    }
 
     function loadSettings() {
         if (!pluginService)
