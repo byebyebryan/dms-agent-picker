@@ -207,9 +207,7 @@ class ClaudeWorkspaceTest(unittest.TestCase):
             ),
             mock.patch.object(picker, "ensure_claude_tmux_session") as ensure,
         ):
-            session = picker.resolve_claude_open_target(
-                picker.HostTarget("snap.lan"), 1.0
-            )
+            session = picker.resolve_claude_open_target(picker.HostTarget("snap.lan"), 1.0)
 
         self.assertEqual("caos", session)
         ensure.assert_not_called()
@@ -251,8 +249,8 @@ class ClaudeWorkspaceTest(unittest.TestCase):
         script = picker._ensure_claude_session_script()
 
         self.assertIn("workspace_cwd=$HOME/code", script)
-        self.assertIn('--resume', script)
-        self.assertIn('@agent_workspace claude', script)
+        self.assertIn("--resume", script)
+        self.assertIn("@agent_workspace claude", script)
 
 
 class TmuxNameTest(unittest.TestCase):
@@ -269,9 +267,7 @@ class TmuxNameTest(unittest.TestCase):
         self.assertIn("#{session_attached}", wait_script)
         self.assertIn('exec "$@"', wait_script)
 
-        codex_script = picker._ensure_session_script(
-            THREAD_A, "project", "/home/test/code/project"
-        )
+        codex_script = picker._ensure_session_script(THREAD_A, "project", "/home/test/code/project")
         claude_script = picker._ensure_claude_session_script()
         self.assertIn("codex_command=\"exec sh -c '$wait_script'", codex_script)
         self.assertIn("claude_command=\"exec sh -c '$wait_script'", claude_script)
@@ -281,6 +277,51 @@ class TmuxNameTest(unittest.TestCase):
             "exec tmux -u attach-session -t '=desktop-config'",
             picker._remote_attach_command("desktop-config"),
         )
+
+
+class TmuxProcessBoundaryTest(unittest.TestCase):
+    def test_local_tmux_creation_uses_a_systemd_scope(self) -> None:
+        with mock.patch.object(picker.shutil, "which", return_value="/usr/bin/systemd-run"):
+            command = picker._tmux_creation_command(
+                picker.HostTarget(None), "echo local", picker.DEFAULT_SSH_POLICY
+            )
+
+        self.assertEqual(
+            [
+                "/usr/bin/systemd-run",
+                "--user",
+                "--scope",
+                "--collect",
+                "--quiet",
+                "--",
+                "sh",
+                "-lc",
+                "echo local",
+            ],
+            command,
+        )
+
+    def test_local_tmux_creation_falls_back_without_systemd_run(self) -> None:
+        with mock.patch.object(picker.shutil, "which", return_value=None):
+            command = picker._tmux_creation_command(
+                picker.HostTarget(None), "echo local", picker.DEFAULT_SSH_POLICY
+            )
+
+        self.assertEqual(["sh", "-lc", "echo local"], command)
+
+    def test_remote_tmux_creation_stays_inside_ssh(self) -> None:
+        with (
+            mock.patch.object(picker, "_ssh_prefix", return_value=["ssh-prefix"]),
+            mock.patch.object(picker.shutil, "which") as which,
+        ):
+            command = picker._tmux_creation_command(
+                picker.HostTarget("remote.lan"),
+                "echo remote",
+                picker.DEFAULT_SSH_POLICY,
+            )
+
+        self.assertEqual(["ssh-prefix", "remote.lan", "sh -lc 'echo remote'"], command)
+        which.assert_not_called()
 
 
 class NiriWindowTest(unittest.TestCase):

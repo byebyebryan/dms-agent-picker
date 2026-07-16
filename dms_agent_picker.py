@@ -212,6 +212,33 @@ def _ssh_prefix(policy: SshPolicy) -> list[str]:
     ]
 
 
+def _local_scope_command(command: list[str]) -> list[str]:
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is None:
+        return command
+    return [
+        systemd_run,
+        "--user",
+        "--scope",
+        "--collect",
+        "--quiet",
+        "--",
+    ] + command
+
+
+def _tmux_creation_command(
+    target: HostTarget,
+    script: str,
+    ssh_policy: SshPolicy,
+) -> list[str]:
+    if target.connect_host is not None:
+        return _ssh_prefix(ssh_policy) + [
+            target.connect_host,
+            "sh -lc " + shlex.quote(script),
+        ]
+    return _local_scope_command(["sh", "-lc", script])
+
+
 def _app_server_command(target: HostTarget, ssh_policy: SshPolicy) -> list[str]:
     if target.connect_host is None:
         codex = shutil.which("codex")
@@ -758,12 +785,7 @@ def ensure_tmux_session(
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> str:
     script = _ensure_session_script(thread_id, name, cwd)
-    command = ["sh", "-lc", script]
-    if target.connect_host is not None:
-        command = _ssh_prefix(ssh_policy) + [
-            target.connect_host,
-            "sh -lc " + shlex.quote(script),
-        ]
+    command = _tmux_creation_command(target, script, ssh_policy)
     try:
         result = subprocess.run(
             command, capture_output=True, text=True, timeout=timeout, check=False
@@ -840,12 +862,7 @@ def ensure_claude_tmux_session(
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> str:
     script = _ensure_claude_session_script()
-    command = ["sh", "-lc", script]
-    if target.connect_host is not None:
-        command = _ssh_prefix(ssh_policy) + [
-            target.connect_host,
-            "sh -lc " + shlex.quote(script),
-        ]
+    command = _tmux_creation_command(target, script, ssh_policy)
     try:
         result = subprocess.run(
             command, capture_output=True, text=True, timeout=timeout, check=False
@@ -902,9 +919,7 @@ def _remote_attach_command(session: str) -> str:
     return "exec tmux -u attach-session -t " + target
 
 
-def _matching_niri_window_id(
-    windows: Sequence[object], session: str, host: str
-) -> int | None:
+def _matching_niri_window_id(windows: Sequence[object], session: str, host: str) -> int | None:
     session_prefix = f"{session}:"
     expected_host = _short_hostname(host)
     for window in windows:
@@ -968,16 +983,7 @@ def launch_attach(
         inner = _ssh_prefix(ssh_policy) + ["-t", target.connect_host, remote_command]
 
     command = _terminal_command(terminal, inner)
-    systemd_run = shutil.which("systemd-run")
-    if systemd_run:
-        command = [
-            systemd_run,
-            "--user",
-            "--scope",
-            "--collect",
-            "--quiet",
-            "--",
-        ] + command
+    command = _local_scope_command(command)
     os.execvp(command[0], command)
 
 

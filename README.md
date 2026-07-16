@@ -86,6 +86,11 @@ directory and runs `codex resume` with the session UUID. New agent processes
 wait for the terminal to attach before startup so terminal capability and color
 probes reach the actual terminal.
 
+On a local systemd desktop, session creation runs in a transient user scope so
+a newly created tmux server does not inherit `dms.service` and survives DMS
+reloads or restarts. Systems without `systemd-run` retain the direct-launch
+fallback, and remote session creation remains owned by the remote host.
+
 For Claude Code, the picker adopts any existing Claude process running in tmux,
 regardless of that tmux session's name. Otherwise it creates the canonical
 `claude-code` tmux session in `~/code` when that directory exists and runs
