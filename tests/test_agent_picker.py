@@ -16,6 +16,75 @@ THREAD_C = "00000000-0000-0000-0000-000000000003"
 THREAD_D = "00000000-0000-0000-0000-000000000004"
 
 
+class CodexThreadTest(unittest.TestCase):
+    def test_lists_only_dedicated_cli_sessions(self) -> None:
+        client = mock.MagicMock()
+        client.call.return_value = {"data": [{"id": THREAD_A}]}
+        context = mock.MagicMock()
+        context.__enter__.return_value = client
+
+        with (
+            mock.patch.object(picker, "_app_server_command", return_value=["codex"]),
+            mock.patch.object(picker, "AppServerClient", return_value=context),
+        ):
+            result = picker.list_codex_threads(picker.HostTarget(None), 20, 1.0)
+
+        self.assertEqual([{"id": THREAD_A}], result)
+        client.call.assert_called_once_with(
+            "thread/list",
+            {
+                "archived": False,
+                "limit": 20,
+                "sortDirection": "desc",
+                "sortKey": "recency_at",
+                "sourceKinds": ["cli"],
+                "useStateDbOnly": True,
+            },
+        )
+
+    def test_detects_only_persistent_app_server_transports(self) -> None:
+        self.assertTrue(
+            picker._is_shared_codex_app_server(
+                ["codex", "app-server", "--listen", "unix://"]
+            )
+        )
+        self.assertTrue(
+            picker._is_shared_codex_app_server(
+                ["codex", "app-server", "--listen=ws://127.0.0.1:4500"]
+            )
+        )
+        self.assertFalse(
+            picker._is_shared_codex_app_server(["codex", "app-server", "--stdio"])
+        )
+        self.assertFalse(
+            picker._is_shared_codex_app_server(
+                ["codex", "app-server", "--listen", "stdio://"]
+            )
+        )
+
+    def test_active_probe_ignores_shared_app_server(self) -> None:
+        process_table = mock.Mock(
+            stdout="100 1 codex\n200 1 codex\n300 1 claude\n"
+        )
+        with (
+            mock.patch.object(picker.subprocess, "run", return_value=process_table),
+            mock.patch.object(
+                picker,
+                "_process_arguments",
+                side_effect=lambda pid: (
+                    ["codex", "app-server", "--listen", "unix://"]
+                    if pid == 100
+                    else ["codex"]
+                ),
+            ),
+        ):
+            parents, codex_pids, claude_pids = picker._process_table()
+
+        self.assertEqual({100: 1, 200: 1, 300: 1}, parents)
+        self.assertEqual({200}, codex_pids)
+        self.assertEqual({300}, claude_pids)
+
+
 class MergeHostResultsTest(unittest.TestCase):
     def test_sorts_by_recency_marks_active_and_deduplicates_aliases(self) -> None:
         laptop_threads = [

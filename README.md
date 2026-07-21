@@ -7,6 +7,12 @@ The picker uses Codex's app-server protocol and Claude's local project
 transcripts for session metadata. It inspects running agent processes to map
 them back to tmux sessions. Remote hosts do not need this project installed.
 
+Codex runtime support is intentionally limited to dedicated CLI/TUI sessions.
+Persistent or shared app-server runtimes are not supported and are ignored by
+active-session discovery. The picker starts a short-lived
+`codex app-server --stdio` process only to query saved session metadata; it does
+not use that process to host interactive sessions.
+
 ## Requirements
 
 Local desktop:
