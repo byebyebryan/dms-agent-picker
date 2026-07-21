@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate and open Codex and Claude Code workspaces from local and SSH hosts."""
+"""Aggregate and open Codex and Claude Code sessions from local and SSH hosts."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
-CLAUDE_TMUX_SESSION = "claude-code"
+VERSION = "0.3.0"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -73,6 +73,170 @@ def parse_host_aliases(values: Sequence[str]) -> dict[str, str]:
     return aliases
 
 
+CLAUDE_SESSION_PROBE = r"""
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+uuid_pattern = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+limit = max(1, int(sys.argv[1]))
+requested_id = sys.argv[2].lower() if len(sys.argv) > 2 and sys.argv[2] else None
+installed = shutil.which("claude") is not None
+config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+projects_dir = config_dir / "projects"
+if not installed:
+    print(json.dumps({"installed": False, "sessions": []}, separators=(",", ":")))
+    raise SystemExit(0)
+
+
+def clean_text(value):
+    if not isinstance(value, str):
+        return ""
+    value = " ".join(value.split())
+    return value[:117] + "..." if len(value) > 120 else value
+
+
+def message_text(message):
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return clean_text(content)
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return clean_text(" ".join(parts))
+
+
+def timestamp_seconds(value):
+    if not isinstance(value, (int, float)):
+        return 0
+    return int(value / 1000 if value > 100000000000 else value)
+
+
+def read_json_lines(path, maximum_bytes=2097152):
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            if size <= maximum_bytes:
+                data = stream.read()
+            else:
+                edge = maximum_bytes // 2
+                head = stream.read(edge)
+                stream.seek(-edge, os.SEEK_END)
+                tail = stream.read(edge)
+                if b"\n" in head:
+                    head = head.rsplit(b"\n", 1)[0]
+                if b"\n" in tail:
+                    tail = tail.split(b"\n", 1)[1]
+                data = head + b"\n" + tail
+    except (OSError, ValueError):
+        return []
+
+    entries = []
+    for raw_line in data.splitlines():
+        try:
+            entry = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+transcripts = []
+if projects_dir.is_dir():
+    for path in projects_dir.glob("*/*.jsonl"):
+        session_id = path.stem.lower()
+        if not uuid_pattern.fullmatch(session_id):
+            continue
+        if requested_id is not None and session_id != requested_id:
+            continue
+        try:
+            modified = int(path.stat().st_mtime)
+        except OSError:
+            continue
+        transcripts.append((modified, session_id, path))
+transcripts.sort(key=lambda item: (item[0], item[1]), reverse=True)
+if requested_id is None:
+    transcripts = transcripts[: max(limit * 3, limit)]
+
+candidate_ids = {item[1] for item in transcripts}
+history = {}
+history_path = config_dir / "history.jsonl"
+if candidate_ids and history_path.is_file():
+    try:
+        stream = history_path.open(encoding="utf-8", errors="replace")
+    except OSError:
+        stream = None
+    if stream is not None:
+        with stream:
+            for line in stream:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                session_id = str(entry.get("sessionId") or "").lower()
+                if session_id not in candidate_ids:
+                    continue
+                item = history.setdefault(session_id, {"name": "", "cwd": "", "recencyAt": 0})
+                if not item["name"]:
+                    item["name"] = clean_text(entry.get("display"))
+                if not item["cwd"] and isinstance(entry.get("project"), str):
+                    item["cwd"] = entry["project"]
+                item["recencyAt"] = max(
+                    item["recencyAt"], timestamp_seconds(entry.get("timestamp"))
+                )
+
+sessions = []
+for modified, session_id, path in transcripts:
+    history_item = history.get(session_id, {})
+    cwd = str(history_item.get("cwd") or "")
+    first_prompt = ""
+    custom_title = ""
+    for entry in read_json_lines(path):
+        if not cwd and isinstance(entry.get("cwd"), str):
+            cwd = entry["cwd"]
+        if entry.get("type") == "custom-title":
+            title = clean_text(entry.get("customTitle"))
+            if title:
+                custom_title = title
+        if (
+            not first_prompt
+            and entry.get("type") == "user"
+            and not entry.get("isMeta")
+        ):
+            first_prompt = message_text(entry.get("message"))
+    name = custom_title or str(history_item.get("name") or "") or first_prompt
+    if not name:
+        name = Path(cwd).name if cwd else "Claude " + session_id[:8]
+    sessions.append(
+        {
+            "id": session_id,
+            "name": name,
+            "cwd": cwd,
+            "recencyAt": max(modified, int(history_item.get("recencyAt") or 0)),
+            "updatedAt": modified,
+        }
+    )
+    if len(sessions) >= limit:
+        break
+
+print(json.dumps({"installed": installed, "sessions": sessions}, separators=(",", ":")))
+"""
+
+
 class AppServerClient:
     """Small JSON-RPC client for one Codex app-server process."""
 
@@ -103,7 +267,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "dms-agent-picker",
                     "title": "DMS Agent Picker",
-                    "version": "0.2.0",
+                    "version": VERSION,
                 }
             },
         )
@@ -158,7 +322,8 @@ class AppServerClient:
 
             for key, _ in events:
                 stream = key.fileobj
-                chunk = os.read(stream.fileno(), 65536)
+                file_descriptor = stream if isinstance(stream, int) else stream.fileno()
+                chunk = os.read(file_descriptor, 65536)
                 if not chunk:
                     try:
                         self._selector.unregister(stream)
@@ -287,6 +452,66 @@ def read_codex_thread(
     return thread
 
 
+def query_claude_sessions(
+    target: HostTarget,
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    arguments = [str(limit), session_id or ""]
+    if target.connect_host is None:
+        command = [sys.executable, "-"] + arguments
+    else:
+        remote_command = "python3 - " + " ".join(shlex.quote(value) for value in arguments)
+        command = _ssh_prefix(ssh_policy) + [target.connect_host, remote_command]
+    try:
+        result = subprocess.run(
+            command,
+            input=CLAUDE_SESSION_PROBE,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PickerError(f"Claude session query timed out on {target.key}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit {result.returncode}"
+        raise PickerError(f"Claude session query failed on {target.key}: {detail}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PickerError(f"Claude session query returned invalid JSON on {target.key}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
+        raise PickerError(f"Claude session query returned invalid data on {target.key}")
+    return payload
+
+
+def list_claude_sessions(
+    target: HostTarget,
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
+    return query_claude_sessions(target, limit, timeout, ssh_policy)
+
+
+def read_claude_session(
+    target: HostTarget,
+    session_id: str,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
+    result = query_claude_sessions(target, 1, timeout, ssh_policy, session_id)
+    if not result.get("installed"):
+        raise PickerError(f"Claude Code is not installed on {target.key}")
+    sessions = result["sessions"]
+    if not sessions or not isinstance(sessions[0], dict):
+        raise PickerError(f"Claude session {session_id} was not found on {target.key}")
+    return sessions[0]
+
+
 def _process_table() -> tuple[dict[int, int], set[int], set[int]]:
     result = subprocess.run(
         ["ps", "-u", str(os.getuid()), "-o", "pid=,ppid=,comm="],
@@ -330,34 +555,37 @@ def _thread_id_for_process(pid: int) -> str | None:
     return None
 
 
-def _tmux_panes() -> tuple[dict[int, str], dict[str, str]]:
+def _tmux_panes() -> tuple[dict[int, str], dict[str, str], dict[str, str]]:
     result = subprocess.run(
         [
             "tmux",
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}",
+            "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}\t#{@claude_session_id}",
         ],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        return {}, {}
+        return {}, {}, {}
 
     pane_sessions: dict[int, str] = {}
-    option_sessions: dict[str, str] = {}
+    codex_option_sessions: dict[str, str] = {}
+    claude_option_sessions: dict[str, str] = {}
     for line in result.stdout.splitlines():
-        parts = line.split("\t", 2)
+        parts = line.split("\t", 3)
         if len(parts) < 2:
             continue
         try:
             pane_sessions[int(parts[1])] = parts[0]
         except ValueError:
             continue
-        if len(parts) == 3 and UUID_PATTERN.fullmatch(parts[2]):
-            option_sessions[parts[2].lower()] = parts[0]
-    return pane_sessions, option_sessions
+        if len(parts) >= 3 and UUID_PATTERN.fullmatch(parts[2]):
+            codex_option_sessions[parts[2].lower()] = parts[0]
+        if len(parts) == 4 and UUID_PATTERN.fullmatch(parts[3]):
+            claude_option_sessions[parts[3].lower()] = parts[0]
+    return pane_sessions, codex_option_sessions, claude_option_sessions
 
 
 def _tmux_session_for_process(
@@ -374,34 +602,74 @@ def _tmux_session_for_process(
     return None
 
 
-def _claude_snapshot(
+def _claude_session_id_from_args(arguments: Sequence[str]) -> str | None:
+    value_flags = {"--resume", "-r", "--session-id"}
+    for index, argument in enumerate(arguments):
+        if argument in value_flags and index + 1 < len(arguments):
+            candidate = arguments[index + 1].lower()
+            if UUID_PATTERN.fullmatch(candidate):
+                return candidate
+        for flag in ("--resume=", "--session-id="):
+            if argument.startswith(flag):
+                candidate = argument[len(flag) :].lower()
+                if UUID_PATTERN.fullmatch(candidate):
+                    return candidate
+    return None
+
+
+def _claude_session_id_for_process(pid: int) -> str | None:
+    try:
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except (FileNotFoundError, PermissionError, OSError):
+        arguments = []
+    session_id = _claude_session_id_from_args(arguments)
+    if session_id is not None:
+        return session_id
+
+    fd_dir = Path(f"/proc/{pid}/fd")
+    try:
+        entries = list(fd_dir.iterdir())
+    except (FileNotFoundError, PermissionError):
+        return None
+    for entry in entries:
+        try:
+            target = os.readlink(entry)
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        path = Path(target)
+        if path.suffix != ".jsonl" or "projects" not in path.parts:
+            continue
+        candidate = path.stem.lower()
+        if UUID_PATTERN.fullmatch(candidate):
+            return candidate
+    return None
+
+
+def _claude_active_sessions(
     parents: Mapping[int, int],
     claude_pids: set[int],
     pane_sessions: Mapping[int, str],
-) -> dict[str, Any]:
-    tmux_sessions = sorted(
-        {
-            session
-            for pid in claude_pids
-            if (session := _tmux_session_for_process(pid, parents, pane_sessions)) is not None
-        }
-    )
-    preferred_session = None
-    if CLAUDE_TMUX_SESSION in tmux_sessions:
-        preferred_session = CLAUDE_TMUX_SESSION
-    elif tmux_sessions:
-        preferred_session = tmux_sessions[0]
-    return {
-        "installed": shutil.which("claude") is not None,
-        "running": bool(claude_pids),
-        "tmuxSession": preferred_session,
-        "tmuxSessions": tmux_sessions,
-    }
+    option_sessions: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    option_ids = {tmux_session: session_id for session_id, tmux_session in option_sessions.items()}
+    active: dict[str, dict[str, Any]] = {}
+    for pid in claude_pids:
+        tmux_session = _tmux_session_for_process(pid, parents, pane_sessions)
+        session_id = option_ids.get(tmux_session or "")
+        if session_id is None:
+            session_id = _claude_session_id_for_process(pid)
+        if session_id is None:
+            continue
+        item = {"pid": pid, "tmuxSession": tmux_session}
+        previous = active.get(session_id)
+        if previous is None or (previous.get("tmuxSession") is None and tmux_session):
+            active[session_id] = item
+    return active
 
 
 def active_snapshot() -> dict[str, Any]:
     parents, codex_pids, claude_pids = _process_table()
-    pane_sessions, option_sessions = _tmux_panes()
+    pane_sessions, option_sessions, claude_option_sessions = _tmux_panes()
     active: dict[str, dict[str, Any]] = {}
 
     for pid in codex_pids:
@@ -421,7 +689,13 @@ def active_snapshot() -> dict[str, Any]:
     return {
         "host": socket.gethostname(),
         "active": active,
-        "claude": _claude_snapshot(parents, claude_pids, pane_sessions),
+        "claudeInstalled": shutil.which("claude") is not None,
+        "claudeActive": _claude_active_sessions(
+            parents,
+            claude_pids,
+            pane_sessions,
+            claude_option_sessions,
+        ),
     }
 
 
@@ -457,23 +731,32 @@ for line in ps.stdout.splitlines():
         claude_pids.add(pid)
 
 panes = subprocess.run(
-    ["tmux", "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}"],
+    [
+        "tmux",
+        "list-panes",
+        "-a",
+        "-F",
+        "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}\t#{@claude_session_id}",
+    ],
     capture_output=True,
     text=True,
 )
 pane_sessions = {}
 option_sessions = {}
+claude_option_sessions = {}
 if panes.returncode == 0:
     for line in panes.stdout.splitlines():
-        parts = line.split("\t", 2)
+        parts = line.split("\t", 3)
         if len(parts) < 2:
             continue
         try:
             pane_sessions[int(parts[1])] = parts[0]
         except ValueError:
             continue
-        if len(parts) == 3 and uuid_pattern.fullmatch(parts[2]):
+        if len(parts) >= 3 and uuid_pattern.fullmatch(parts[2]):
             option_sessions[parts[2].lower()] = parts[0]
+        if len(parts) == 4 and uuid_pattern.fullmatch(parts[3]):
+            claude_option_sessions[parts[3].lower()] = parts[0]
 
 active = {}
 def tmux_session_for_process(pid):
@@ -515,26 +798,67 @@ for pid in codex_pids:
     if previous is None or (previous.get("tmuxSession") is None and tmux_session):
         active[thread_id] = item
 
-claude_tmux_sessions = sorted({
-    tmux_session
-    for pid in claude_pids
-    if (tmux_session := tmux_session_for_process(pid)) is not None
-})
-if "claude-code" in claude_tmux_sessions:
-    claude_tmux_session = "claude-code"
-elif claude_tmux_sessions:
-    claude_tmux_session = claude_tmux_sessions[0]
-else:
-    claude_tmux_session = None
-claude = {
-    "installed": shutil.which("claude") is not None,
-    "running": bool(claude_pids),
-    "tmuxSession": claude_tmux_session,
-    "tmuxSessions": claude_tmux_sessions,
+def claude_session_id_from_args(arguments):
+    for index, argument in enumerate(arguments):
+        if argument in {"--resume", "-r", "--session-id"} and index + 1 < len(arguments):
+            candidate = arguments[index + 1].lower()
+            if uuid_pattern.fullmatch(candidate):
+                return candidate
+        for flag in ("--resume=", "--session-id="):
+            if argument.startswith(flag):
+                candidate = argument[len(flag):].lower()
+                if uuid_pattern.fullmatch(candidate):
+                    return candidate
+    return None
+
+def claude_session_id_for_process(pid):
+    try:
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except (FileNotFoundError, PermissionError, OSError):
+        arguments = []
+    session_id = claude_session_id_from_args(arguments)
+    if session_id is not None:
+        return session_id
+    try:
+        entries = list(Path(f"/proc/{pid}/fd").iterdir())
+    except (FileNotFoundError, PermissionError):
+        entries = []
+    for entry in entries:
+        try:
+            target = os.readlink(entry)
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        path = Path(target)
+        if path.suffix != ".jsonl" or "projects" not in path.parts:
+            continue
+        candidate = path.stem.lower()
+        if uuid_pattern.fullmatch(candidate):
+            return candidate
+    return None
+
+claude_active = {}
+claude_option_ids = {
+    tmux_session: session_id for session_id, tmux_session in claude_option_sessions.items()
 }
+for pid in claude_pids:
+    tmux_session = tmux_session_for_process(pid)
+    session_id = claude_option_ids.get(tmux_session or "")
+    if session_id is None:
+        session_id = claude_session_id_for_process(pid)
+    if session_id is None:
+        continue
+    item = {"pid": pid, "tmuxSession": tmux_session}
+    previous = claude_active.get(session_id)
+    if previous is None or (previous.get("tmuxSession") is None and tmux_session):
+        claude_active[session_id] = item
 
 print(json.dumps(
-    {"host": socket.gethostname(), "active": active, "claude": claude},
+    {
+        "host": socket.gethostname(),
+        "active": active,
+        "claudeInstalled": shutil.which("claude") is not None,
+        "claudeActive": claude_active,
+    },
     separators=(",", ":"),
 ))
 """
@@ -565,7 +889,7 @@ def remote_active_snapshot(
     if (
         not isinstance(payload, dict)
         or not isinstance(payload.get("active"), dict)
-        or not isinstance(payload.get("claude"), dict)
+        or not isinstance(payload.get("claudeActive"), dict)
     ):
         raise PickerError(f"active-session probe returned invalid data on {host}")
     return payload
@@ -583,76 +907,99 @@ def get_active_snapshot(
 
 def merge_host_results(
     host_results: Sequence[
-        tuple[HostTarget, list[dict[str, Any]] | Exception, dict[str, Any] | Exception]
+        tuple[
+            HostTarget,
+            list[dict[str, Any]] | Exception,
+            dict[str, Any] | Exception,
+            dict[str, Any] | Exception,
+        ]
     ],
     limit: int,
     aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     aliases = aliases or {}
     sessions: list[dict[str, Any]] = []
-    workspaces: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
-    for target, threads_result, active_result in host_results:
+    for target, threads_result, claude_result, active_result in host_results:
         if isinstance(active_result, Exception):
             errors.append({"host": target.key, "stage": "active", "message": str(active_result)})
             canonical_host = target.key
             active_map: dict[str, Any] = {}
-            claude: dict[str, Any] = {}
+            claude_active_map: dict[str, Any] = {}
         else:
             canonical_host = str(active_result.get("host") or target.key)
             active_map = active_result.get("active", {})
-            claude = active_result.get("claude", {})
+            claude_active_map = active_result.get("claudeActive", {})
         display_host = aliases.get(_short_hostname(canonical_host), canonical_host)
-
-        if claude.get("installed"):
-            workspaces.append(
-                {
-                    "kind": "claude",
-                    "id": CLAUDE_TMUX_SESSION,
-                    "name": "Claude Code",
-                    "host": display_host,
-                    "windowHost": canonical_host,
-                    "connectHost": target.key,
-                    "active": bool(claude.get("running")),
-                    "tmuxSession": claude.get("tmuxSession"),
-                }
-            )
 
         if isinstance(threads_result, Exception):
             errors.append({"host": target.key, "stage": "threads", "message": str(threads_result)})
-            continue
+        else:
+            for thread in threads_result:
+                thread_id = str(thread.get("id") or "").lower()
+                if not UUID_PATTERN.fullmatch(thread_id):
+                    continue
+                active_info = active_map.get(thread_id)
+                name = str(thread.get("name") or "").strip()
+                cwd = str(thread.get("cwd") or "").strip()
+                sessions.append(
+                    {
+                        "kind": "codex",
+                        "id": thread_id,
+                        "name": name or Path(cwd).name or thread_id[:8],
+                        "cwd": cwd,
+                        "host": display_host,
+                        "windowHost": canonical_host,
+                        "connectHost": target.key,
+                        "recencyAt": int(thread.get("recencyAt") or 0),
+                        "updatedAt": int(thread.get("updatedAt") or 0),
+                        "active": active_info is not None,
+                        "tmuxSession": (
+                            active_info.get("tmuxSession")
+                            if isinstance(active_info, dict)
+                            else None
+                        ),
+                    }
+                )
 
-        for thread in threads_result:
-            thread_id = str(thread.get("id") or "").lower()
-            if not UUID_PATTERN.fullmatch(thread_id):
-                continue
-            active_info = active_map.get(thread_id)
-            name = str(thread.get("name") or "").strip()
-            cwd = str(thread.get("cwd") or "").strip()
-            sessions.append(
-                {
-                    "kind": "codex",
-                    "id": thread_id,
-                    "name": name or Path(cwd).name or thread_id[:8],
-                    "cwd": cwd,
-                    "host": display_host,
-                    "windowHost": canonical_host,
-                    "connectHost": target.key,
-                    "recencyAt": int(thread.get("recencyAt") or 0),
-                    "updatedAt": int(thread.get("updatedAt") or 0),
-                    "active": active_info is not None,
-                    "tmuxSession": (
-                        active_info.get("tmuxSession") if isinstance(active_info, dict) else None
-                    ),
-                }
-            )
+        if isinstance(claude_result, Exception):
+            errors.append({"host": target.key, "stage": "claude", "message": str(claude_result)})
+        elif claude_result.get("installed"):
+            for conversation in claude_result.get("sessions", []):
+                if not isinstance(conversation, dict):
+                    continue
+                session_id = str(conversation.get("id") or "").lower()
+                if not UUID_PATTERN.fullmatch(session_id):
+                    continue
+                active_info = claude_active_map.get(session_id)
+                name = str(conversation.get("name") or "").strip()
+                cwd = str(conversation.get("cwd") or "").strip()
+                sessions.append(
+                    {
+                        "kind": "claude",
+                        "id": session_id,
+                        "name": name or Path(cwd).name or session_id[:8],
+                        "cwd": cwd,
+                        "host": display_host,
+                        "windowHost": canonical_host,
+                        "connectHost": target.key,
+                        "recencyAt": int(conversation.get("recencyAt") or 0),
+                        "updatedAt": int(conversation.get("updatedAt") or 0),
+                        "active": active_info is not None,
+                        "tmuxSession": (
+                            active_info.get("tmuxSession")
+                            if isinstance(active_info, dict)
+                            else None
+                        ),
+                    }
+                )
 
     sessions.sort(key=lambda item: (item["recencyAt"], item["id"]), reverse=True)
     deduplicated: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for session in sessions:
-        key = (session["windowHost"], session["id"])
+        key = (session["windowHost"], session["kind"], session["id"])
         if key in seen:
             continue
         seen.add(key)
@@ -660,18 +1007,8 @@ def merge_host_results(
         if len(deduplicated) >= limit:
             break
 
-    deduplicated_workspaces: list[dict[str, Any]] = []
-    seen_hosts: set[str] = set()
-    for workspace in workspaces:
-        host = _short_hostname(workspace["windowHost"])
-        if host in seen_hosts:
-            continue
-        seen_hosts.add(host)
-        deduplicated_workspaces.append(workspace)
-
     return {
         "generatedAt": int(time.time()),
-        "workspaces": deduplicated_workspaces,
         "sessions": deduplicated,
         "errors": errors,
     }
@@ -700,11 +1037,16 @@ def aggregate_sessions(
     )
 
     thread_results: dict[str, list[dict[str, Any]] | Exception] = {}
+    claude_results: dict[str, dict[str, Any] | Exception] = {}
     active_results: dict[str, dict[str, Any] | Exception] = {}
-    workers = max(1, min(12, len(targets) * 2))
+    workers = max(1, min(12, len(targets) * 3))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         thread_futures = {
             target.key: pool.submit(list_codex_threads, target, limit, timeout, ssh_policy)
+            for target in targets
+        }
+        claude_futures = {
+            target.key: pool.submit(list_claude_sessions, target, limit, timeout, ssh_policy)
             for target in targets
         }
         active_futures = {
@@ -717,12 +1059,24 @@ def aggregate_sessions(
             except Exception as exc:  # Keep other hosts usable.
                 thread_results[target.key] = exc
             try:
+                claude_results[target.key] = claude_futures[target.key].result()
+            except Exception as exc:  # Claude is optional on every host.
+                claude_results[target.key] = exc
+            try:
                 active_results[target.key] = active_futures[target.key].result()
             except Exception as exc:  # Active state is optional list metadata.
                 active_results[target.key] = exc
 
     return merge_host_results(
-        [(target, thread_results[target.key], active_results[target.key]) for target in targets],
+        [
+            (
+                target,
+                thread_results[target.key],
+                claude_results[target.key],
+                active_results[target.key],
+            )
+            for target in targets
+        ],
         limit,
         aliases,
     )
@@ -730,7 +1084,7 @@ def aggregate_sessions(
 
 def _safe_tmux_name(name: str, thread_id: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip()).strip("-")
-    return cleaned[:48] or f"codex-{thread_id[:8]}"
+    return cleaned[:48] or f"agent-{thread_id[:8]}"
 
 
 def _tmux_client_wait_script() -> str:
@@ -831,70 +1185,100 @@ def resolve_open_target(
     )
 
 
-def _ensure_claude_session_script() -> str:
+def _ensure_claude_session_script(session_id: str, name: str, cwd: str) -> str:
+    base = _safe_tmux_name(name, session_id)
+    short_id = session_id[:8]
     wait_script = _tmux_client_wait_script()
     return f"""set -eu
-session={shlex.quote(CLAUDE_TMUX_SESSION)}
+session_id={shlex.quote(session_id)}
+display_name={shlex.quote(name)}
+requested_cwd={shlex.quote(cwd)}
+base={shlex.quote(base)}
+short_id={shlex.quote(short_id)}
 wait_script={shlex.quote(wait_script)}
 claude_bin=$(command -v claude || true)
 if [ -z "$claude_bin" ]; then
     printf '%s\n' 'claude is not installed' >&2
     exit 1
 fi
-if tmux has-session -t "=$session" 2>/dev/null; then
-    printf '%s\n' "$session"
-    exit 0
+if [ -z "$requested_cwd" ] || [ ! -d "$requested_cwd" ]; then
+    requested_cwd=$HOME
 fi
-workspace_cwd=$HOME/code
-if [ ! -d "$workspace_cwd" ]; then
-    workspace_cwd=$HOME
-fi
-claude_command="exec sh -c '$wait_script' sh \"$claude_bin\" --resume"
-tmux new-session -d -s "$session" -c "$workspace_cwd" "$claude_command"
-tmux set-option -t "$session" @agent_workspace claude
-printf '%s\n' "$session"
+candidate=$base
+counter=0
+while tmux has-session -t "=$candidate" 2>/dev/null; do
+    counter=$((counter + 1))
+    if [ "$counter" -eq 1 ]; then
+        candidate="${{base}}-${{short_id}}"
+    else
+        candidate="${{base}}-${{short_id}}-$counter"
+    fi
+done
+claude_command="exec sh -c '$wait_script' sh \"$claude_bin\" --resume \"$session_id\""
+tmux new-session -d -s "$candidate" -c "$requested_cwd"
+tmux set-option -t "$candidate" @claude_session_id "$session_id"
+tmux set-option -t "$candidate" @claude_name "$display_name"
+tmux respawn-pane -k -t "$candidate:0.0" -c "$requested_cwd" "$claude_command"
+printf '%s\n' "$candidate"
 """
 
 
 def ensure_claude_tmux_session(
     target: HostTarget,
+    session_id: str,
+    name: str,
+    cwd: str,
     timeout: float,
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> str:
-    script = _ensure_claude_session_script()
+    script = _ensure_claude_session_script(session_id, name, cwd)
     command = _tmux_creation_command(target, script, ssh_policy)
     try:
         result = subprocess.run(
             command, capture_output=True, text=True, timeout=timeout, check=False
         )
     except subprocess.TimeoutExpired as exc:
-        raise PickerError(f"timed out creating Claude Code workspace on {target.key}") from exc
+        raise PickerError(f"timed out creating Claude session on {target.key}") from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or f"exit {result.returncode}"
-        raise PickerError(f"failed to create Claude Code workspace on {target.key}: {detail}")
+        raise PickerError(f"failed to create Claude session on {target.key}: {detail}")
     session = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
     if not session:
-        raise PickerError(f"tmux did not return a Claude Code workspace on {target.key}")
+        raise PickerError(f"tmux did not return a Claude session on {target.key}")
     return session
 
 
 def resolve_claude_open_target(
     target: HostTarget,
+    session_id: str,
+    name: str | None,
+    cwd: str | None,
     timeout: float,
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> str:
     snapshot = get_active_snapshot(target, timeout, ssh_policy)
-    claude = snapshot.get("claude")
-    if not isinstance(claude, dict) or not claude.get("installed"):
+    if not snapshot.get("claudeInstalled"):
         raise PickerError(f"Claude Code is not installed on {target.key}")
 
-    if claude.get("running"):
-        tmux_session = claude.get("tmuxSession")
+    active_info = snapshot.get("claudeActive", {}).get(session_id)
+    if isinstance(active_info, dict):
+        tmux_session = active_info.get("tmuxSession")
         if tmux_session:
             return str(tmux_session)
-        raise PickerError(f"Claude Code is active on {target.key} outside tmux")
+        raise PickerError(f"Claude session {session_id[:8]} is active on {target.key} outside tmux")
 
-    return ensure_claude_tmux_session(target, timeout, ssh_policy)
+    if not name or cwd is None:
+        conversation = read_claude_session(target, session_id, timeout, ssh_policy)
+        name = name or str(conversation.get("name") or "")
+        cwd = cwd if cwd is not None else str(conversation.get("cwd") or "")
+    return ensure_claude_tmux_session(
+        target,
+        session_id,
+        name or "claude",
+        cwd or "",
+        timeout,
+        ssh_policy,
+    )
 
 
 def _terminal_command(terminal: str, inner: list[str]) -> list[str]:
@@ -990,7 +1374,7 @@ def launch_attach(
 def _valid_thread_id(value: str) -> str:
     value = value.lower()
     if not UUID_PATTERN.fullmatch(value):
-        raise argparse.ArgumentTypeError("expected a Codex session UUID")
+        raise argparse.ArgumentTypeError("expected a session UUID")
     return value
 
 
@@ -1020,7 +1404,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     list_parser.add_argument("--no-local", action="store_true")
 
-    active_parser = subparsers.add_parser("active", help="show active local Codex sessions as JSON")
+    active_parser = subparsers.add_parser("active", help="show active local agent sessions as JSON")
     active_parser.set_defaults(command="active")
 
     open_parser = subparsers.add_parser("open", help="open or resume a Codex session")
@@ -1031,11 +1415,12 @@ def build_parser() -> argparse.ArgumentParser:
     open_parser.add_argument("--cwd")
     open_parser.add_argument("--terminal", default=os.environ.get("TERMINAL", "ghostty"))
 
-    claude_parser = subparsers.add_parser(
-        "open-claude", help="open the host's Claude Code workspace"
-    )
+    claude_parser = subparsers.add_parser("open-claude", help="open or resume a Claude session")
     claude_parser.add_argument("--host", default="local")
     claude_parser.add_argument("--window-host")
+    claude_parser.add_argument("--id", required=True, type=_valid_thread_id)
+    claude_parser.add_argument("--name")
+    claude_parser.add_argument("--cwd")
     claude_parser.add_argument("--terminal", default=os.environ.get("TERMINAL", "ghostty"))
 
     return parser
@@ -1073,7 +1458,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         target = HostTarget(None if args.host in {"", "local"} else args.host)
         if args.command == "open-claude":
-            session = resolve_claude_open_target(target, args.timeout, ssh_policy)
+            session = resolve_claude_open_target(
+                target,
+                args.id,
+                args.name,
+                args.cwd,
+                args.timeout,
+                ssh_policy,
+            )
         else:
             session = resolve_open_target(
                 target,

@@ -1,15 +1,11 @@
 # DMS Agent Picker
 
-A DankMaterialShell launcher plugin for Codex CLI sessions and Claude Code
-workspaces across local and SSH hosts.
+A DankMaterialShell launcher plugin for Codex CLI and Claude Code sessions
+across local and SSH hosts.
 
-The picker uses Codex's app-server protocol for session metadata and inspects
-running agent processes to map them back to tmux sessions. Remote hosts do not
-need this project installed.
-
-Codex sessions are listed individually. Claude Code is represented by one
-workspace per host and delegates conversation selection to Claude's built-in
-session picker.
+The picker uses Codex's app-server protocol and Claude's local project
+transcripts for session metadata. It inspects running agent processes to map
+them back to tmux sessions. Remote hosts do not need this project installed.
 
 ## Requirements
 
@@ -28,8 +24,8 @@ Remote hosts:
 - Python 3
 - tmux
 
-Claude Code is optional on every host. Hosts where it is installed gain a
-`Claude Code` launcher item automatically.
+Claude Code is optional on every host. Its saved conversations are included
+automatically where it is installed.
 
 ## Install
 
@@ -60,7 +56,7 @@ List the 20 most recently prompted sessions:
 dms-agent-picker list --host laptop.lan --limit 20 | jq
 ```
 
-Inspect active local Codex sessions:
+Inspect active local agent sessions:
 
 ```sh
 dms-agent-picker active | jq
@@ -74,29 +70,30 @@ dms-agent-picker open \
   --id 00000000-0000-0000-0000-000000000000
 ```
 
-Open a host's Claude Code workspace:
+Open a saved Claude Code session:
 
 ```sh
-dms-agent-picker open-claude --host laptop.lan
+dms-agent-picker open-claude \
+  --host laptop.lan \
+  --id 00000000-0000-0000-0000-000000000000
 ```
 
 If the session is active in tmux, the picker attaches to that tmux session. If
 it is inactive, the picker creates a tmux session in the recorded working
-directory and runs `codex resume` with the session UUID. New agent processes
-wait for the terminal to attach before startup so terminal capability and color
-probes reach the actual terminal.
+directory and resumes the selected UUID with `codex resume` or
+`claude --resume`. New agent processes wait for the terminal to attach before
+startup so terminal capability and color probes reach the actual terminal.
 
 On a local systemd desktop, session creation runs in a transient user scope so
 a newly created tmux server does not inherit `dms.service` and survives DMS
 reloads or restarts. Systems without `systemd-run` retain the direct-launch
 fallback, and remote session creation remains owned by the remote host.
 
-For Claude Code, the picker adopts any existing Claude process running in tmux,
-regardless of that tmux session's name. Otherwise it creates the canonical
-`claude-code` tmux session in `~/code` when that directory exists and runs
-`claude --resume`. Claude's picker initially scopes sessions to the current
-project; press `Ctrl+A` there to show sessions from every project on the host.
-The plugin does not inspect or track Claude conversation IDs.
+Claude conversations are discovered from
+`$CLAUDE_CONFIG_DIR/projects/*/*.jsonl`, or `~/.claude/projects/*/*.jsonl` when
+that variable is unset. Sessions created by this plugin carry their Claude UUID
+as tmux metadata, allowing later launcher queries to identify and reuse the
+exact active conversation.
 
 Under niri, the picker first focuses an existing terminal window attached to
 the same host and tmux session. It opens a new terminal only when no matching

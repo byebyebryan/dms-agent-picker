@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
@@ -8,6 +12,7 @@ import dms_agent_picker as picker
 
 THREAD_A = "00000000-0000-0000-0000-000000000001"
 THREAD_B = "00000000-0000-0000-0000-000000000002"
+THREAD_C = "00000000-0000-0000-0000-000000000003"
 
 
 class MergeHostResultsTest(unittest.TestCase):
@@ -40,10 +45,21 @@ class MergeHostResultsTest(unittest.TestCase):
                 (
                     picker.HostTarget(None),
                     local_threads,
+                    {"installed": False, "sessions": []},
                     {"host": "desktop", "active": {}},
                 ),
-                (picker.HostTarget("laptop.lan"), laptop_threads, laptop_active),
-                (picker.HostTarget("laptop-alias"), laptop_threads, laptop_active),
+                (
+                    picker.HostTarget("laptop.lan"),
+                    laptop_threads,
+                    {"installed": False, "sessions": []},
+                    laptop_active,
+                ),
+                (
+                    picker.HostTarget("laptop-alias"),
+                    laptop_threads,
+                    {"installed": False, "sessions": []},
+                    laptop_active,
+                ),
             ],
             limit=20,
         )
@@ -68,6 +84,7 @@ class MergeHostResultsTest(unittest.TestCase):
                             "updatedAt": 7,
                         }
                     ],
+                    {"installed": False, "sessions": []},
                     picker.PickerError("probe failed"),
                 )
             ],
@@ -77,19 +94,29 @@ class MergeHostResultsTest(unittest.TestCase):
         self.assertFalse(result["sessions"][0]["active"])
         self.assertEqual("active", result["errors"][0]["stage"])
 
-    def test_claude_workspace_survives_codex_list_failure(self) -> None:
+    def test_claude_session_survives_codex_list_failure(self) -> None:
         result = picker.merge_host_results(
             [
                 (
                     picker.HostTarget("snap.lan"),
                     picker.PickerError("codex unavailable"),
                     {
+                        "installed": True,
+                        "sessions": [
+                            {
+                                "id": THREAD_C,
+                                "name": "Improve auth flow",
+                                "cwd": "/home/test/code/app",
+                                "recencyAt": 80,
+                                "updatedAt": 80,
+                            }
+                        ],
+                    },
+                    {
                         "host": "80H1VV3",
                         "active": {},
-                        "claude": {
-                            "installed": True,
-                            "running": True,
-                            "tmuxSession": "caos",
+                        "claudeActive": {
+                            THREAD_C: {"pid": 42, "tmuxSession": "improve-auth-flow"}
                         },
                     },
                 )
@@ -98,39 +125,74 @@ class MergeHostResultsTest(unittest.TestCase):
             aliases={"80h1vv3": "snap"},
         )
 
-        self.assertEqual([], result["sessions"])
         self.assertEqual(
             {
                 "kind": "claude",
-                "id": "claude-code",
-                "name": "Claude Code",
+                "id": THREAD_C,
+                "name": "Improve auth flow",
+                "cwd": "/home/test/code/app",
                 "host": "snap",
                 "windowHost": "80H1VV3",
                 "connectHost": "snap.lan",
+                "recencyAt": 80,
+                "updatedAt": 80,
                 "active": True,
-                "tmuxSession": "caos",
+                "tmuxSession": "improve-auth-flow",
             },
-            result["workspaces"][0],
+            result["sessions"][0],
         )
         self.assertEqual("threads", result["errors"][0]["stage"])
 
-    def test_unavailable_claude_workspace_is_omitted(self) -> None:
+    def test_unavailable_claude_sessions_are_omitted(self) -> None:
         result = picker.merge_host_results(
             [
                 (
                     picker.HostTarget(None),
                     [],
+                    {"installed": False, "sessions": [{"id": THREAD_C}]},
                     {
                         "host": "desktop",
                         "active": {},
-                        "claude": {"installed": False, "running": False},
+                        "claudeActive": {},
                     },
                 )
             ],
             limit=20,
         )
 
-        self.assertEqual([], result["workspaces"])
+        self.assertEqual([], result["sessions"])
+
+    def test_codex_and_claude_sessions_share_recency_order(self) -> None:
+        result = picker.merge_host_results(
+            [
+                (
+                    picker.HostTarget(None),
+                    [
+                        {
+                            "id": THREAD_A,
+                            "name": "Codex task",
+                            "cwd": "/home/test/code/app",
+                            "recencyAt": 10,
+                        }
+                    ],
+                    {
+                        "installed": True,
+                        "sessions": [
+                            {
+                                "id": THREAD_C,
+                                "name": "Claude task",
+                                "cwd": "/home/test/code/app",
+                                "recencyAt": 20,
+                            }
+                        ],
+                    },
+                    {"host": "desktop", "active": {}, "claudeActive": {}},
+                )
+            ],
+            limit=20,
+        )
+
+        self.assertEqual(["claude", "codex"], [item["kind"] for item in result["sessions"]])
 
 
 class OpenTargetTest(unittest.TestCase):
@@ -166,29 +228,90 @@ class OpenTargetTest(unittest.TestCase):
                 picker.resolve_open_target(picker.HostTarget(None), THREAD_A, "cubey", "/tmp", 1.0)
 
 
-class ClaudeWorkspaceTest(unittest.TestCase):
-    def test_snapshot_adopts_existing_claude_tmux_session(self) -> None:
-        with mock.patch.object(picker.shutil, "which", return_value="/usr/bin/claude"):
-            snapshot = picker._claude_snapshot(
+class ClaudeSessionTest(unittest.TestCase):
+    def test_discovers_named_session_from_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            claude = bin_dir / "claude"
+            claude.write_text("#!/bin/sh\nexit 0\n")
+            claude.chmod(0o755)
+
+            config_dir = root / ".claude"
+            project_dir = config_dir / "projects" / "-home-test-code-app"
+            project_dir.mkdir(parents=True)
+            transcript = project_dir / f"{THREAD_C}.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "sessionId": THREAD_C,
+                                "cwd": "/home/test/code/app",
+                                "message": {"role": "user", "content": "Initial request"},
+                            }
+                        ),
+                        "not valid json",
+                        json.dumps(
+                            {
+                                "type": "custom-title",
+                                "sessionId": THREAD_C,
+                                "customTitle": "Improve auth flow",
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+            (config_dir / "history.jsonl").write_text(
+                json.dumps(
+                    {
+                        "display": "Initial request",
+                        "project": "/home/test/code/app",
+                        "sessionId": THREAD_C,
+                        "timestamp": 2_000_000_000_000,
+                    }
+                )
+                + "\n"
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CONFIG_DIR": str(config_dir),
+                    "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                },
+            ):
+                result = picker.list_claude_sessions(picker.HostTarget(None), 20, 2.0)
+
+        self.assertTrue(result["installed"])
+        self.assertEqual(THREAD_C, result["sessions"][0]["id"])
+        self.assertEqual("Improve auth flow", result["sessions"][0]["name"])
+        self.assertEqual("/home/test/code/app", result["sessions"][0]["cwd"])
+        self.assertEqual(2_000_000_000, result["sessions"][0]["recencyAt"])
+
+    def test_active_snapshot_uses_managed_tmux_session_id(self) -> None:
+        with mock.patch.object(picker, "_claude_session_id_for_process", return_value=None):
+            active = picker._claude_active_sessions(
                 parents={300: 200, 200: 1},
                 claude_pids={300},
-                pane_sessions={200: "caos"},
+                pane_sessions={200: "auth-flow"},
+                option_sessions={THREAD_C: "auth-flow"},
             )
 
-        self.assertTrue(snapshot["installed"])
-        self.assertTrue(snapshot["running"])
-        self.assertEqual("caos", snapshot["tmuxSession"])
+        self.assertEqual({THREAD_C: {"pid": 300, "tmuxSession": "auth-flow"}}, active)
 
-    def test_snapshot_prefers_managed_session_when_multiple_exist(self) -> None:
-        with mock.patch.object(picker.shutil, "which", return_value="/usr/bin/claude"):
-            snapshot = picker._claude_snapshot(
-                parents={300: 200, 500: 400},
-                claude_pids={300, 500},
-                pane_sessions={200: "caos", 400: "claude-code"},
-            )
-
-        self.assertEqual("claude-code", snapshot["tmuxSession"])
-        self.assertEqual(["caos", "claude-code"], snapshot["tmuxSessions"])
+    def test_extracts_session_id_from_resume_arguments(self) -> None:
+        self.assertEqual(
+            THREAD_C,
+            picker._claude_session_id_from_args(["claude", "--resume", THREAD_C]),
+        )
+        self.assertEqual(
+            THREAD_C,
+            picker._claude_session_id_from_args(["claude", f"--session-id={THREAD_C}"]),
+        )
 
     def test_open_reuses_existing_claude_tmux_session(self) -> None:
         with (
@@ -198,18 +321,21 @@ class ClaudeWorkspaceTest(unittest.TestCase):
                 return_value={
                     "host": "80H1VV3",
                     "active": {},
-                    "claude": {
-                        "installed": True,
-                        "running": True,
-                        "tmuxSession": "caos",
-                    },
+                    "claudeInstalled": True,
+                    "claudeActive": {THREAD_C: {"pid": 42, "tmuxSession": "auth-flow"}},
                 },
             ),
             mock.patch.object(picker, "ensure_claude_tmux_session") as ensure,
         ):
-            session = picker.resolve_claude_open_target(picker.HostTarget("snap.lan"), 1.0)
+            session = picker.resolve_claude_open_target(
+                picker.HostTarget("snap.lan"),
+                THREAD_C,
+                "Improve auth flow",
+                "/home/test/code/app",
+                1.0,
+            )
 
-        self.assertEqual("caos", session)
+        self.assertEqual("auth-flow", session)
         ensure.assert_not_called()
 
     def test_active_claude_outside_tmux_is_not_duplicated(self) -> None:
@@ -219,11 +345,14 @@ class ClaudeWorkspaceTest(unittest.TestCase):
             return_value={
                 "host": "desktop",
                 "active": {},
-                "claude": {"installed": True, "running": True, "tmuxSession": None},
+                "claudeInstalled": True,
+                "claudeActive": {THREAD_C: {"pid": 42, "tmuxSession": None}},
             },
         ):
             with self.assertRaisesRegex(picker.PickerError, "outside tmux"):
-                picker.resolve_claude_open_target(picker.HostTarget(None), 1.0)
+                picker.resolve_claude_open_target(
+                    picker.HostTarget(None), THREAD_C, "Improve auth flow", "/tmp", 1.0
+                )
 
     def test_inactive_claude_creates_managed_session(self) -> None:
         with (
@@ -233,24 +362,34 @@ class ClaudeWorkspaceTest(unittest.TestCase):
                 return_value={
                     "host": "desktop",
                     "active": {},
-                    "claude": {"installed": True, "running": False, "tmuxSession": None},
+                    "claudeInstalled": True,
+                    "claudeActive": {},
                 },
             ),
             mock.patch.object(
-                picker, "ensure_claude_tmux_session", return_value="claude-code"
+                picker, "ensure_claude_tmux_session", return_value="improve-auth-flow"
             ) as ensure,
         ):
-            session = picker.resolve_claude_open_target(picker.HostTarget(None), 1.0)
+            session = picker.resolve_claude_open_target(
+                picker.HostTarget(None),
+                THREAD_C,
+                "Improve auth flow",
+                "/home/test/code/app",
+                1.0,
+            )
 
-        self.assertEqual("claude-code", session)
+        self.assertEqual("improve-auth-flow", session)
         ensure.assert_called_once()
 
-    def test_managed_session_starts_in_code_and_opens_resume_picker(self) -> None:
-        script = picker._ensure_claude_session_script()
+    def test_managed_session_resumes_exact_id_in_recorded_directory(self) -> None:
+        script = picker._ensure_claude_session_script(
+            THREAD_C, "Improve auth flow", "/home/test/code/app"
+        )
 
-        self.assertIn("workspace_cwd=$HOME/code", script)
+        self.assertIn("requested_cwd=/home/test/code/app", script)
         self.assertIn("--resume", script)
-        self.assertIn("@agent_workspace claude", script)
+        self.assertIn('"$session_id"', script)
+        self.assertIn("@claude_session_id", script)
 
 
 class TmuxNameTest(unittest.TestCase):
@@ -268,7 +407,9 @@ class TmuxNameTest(unittest.TestCase):
         self.assertIn('exec "$@"', wait_script)
 
         codex_script = picker._ensure_session_script(THREAD_A, "project", "/home/test/code/project")
-        claude_script = picker._ensure_claude_session_script()
+        claude_script = picker._ensure_claude_session_script(
+            THREAD_C, "project", "/home/test/code/project"
+        )
         self.assertIn("codex_command=\"exec sh -c '$wait_script'", codex_script)
         self.assertIn("claude_command=\"exec sh -c '$wait_script'", claude_script)
 
@@ -382,6 +523,7 @@ class HostConfigTest(unittest.TestCase):
                 (
                     picker.HostTarget("snap.lan"),
                     [{"id": THREAD_A, "name": "dotfiles", "cwd": "/home/test"}],
+                    {"installed": False, "sessions": []},
                     {"host": "80H1VV3", "active": {}},
                 )
             ],
@@ -396,6 +538,11 @@ class HostConfigTest(unittest.TestCase):
         with (
             mock.patch.object(picker.socket, "gethostname", return_value="80H1VV3"),
             mock.patch.object(picker, "list_codex_threads", return_value=[]),
+            mock.patch.object(
+                picker,
+                "list_claude_sessions",
+                return_value={"installed": False, "sessions": []},
+            ),
             mock.patch.object(
                 picker,
                 "get_active_snapshot",
