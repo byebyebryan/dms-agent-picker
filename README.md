@@ -7,11 +7,26 @@ The picker uses Codex's app-server protocol and Claude's local project
 transcripts for session metadata. It inspects running agent processes to map
 them back to tmux sessions. Remote hosts do not need this project installed.
 
-Codex runtime support is intentionally limited to dedicated CLI/TUI sessions.
-Persistent or shared app-server runtimes are not supported and are ignored by
-active-session discovery. The picker starts a short-lived
-`codex app-server --stdio` process only to query saved session metadata; it does
-not use that process to host interactive sessions.
+## Runtime scope
+
+The supported execution model is one dedicated CLI/TUI process per interactive
+session, managed through tmux.
+
+- Codex sessions are opened with `codex resume`. Persistent or shared
+  app-server runtimes, including TUIs connected with `codex --remote`, are not
+  supported and are ignored by active-session discovery. The picker starts a
+  short-lived `codex app-server --stdio` process only to query saved session
+  metadata; it does not use that process to host interactive sessions.
+- Claude sessions are opened with `claude --resume`. Claude Agent View sessions
+  hosted by its per-user supervisor are not supported, and the picker does not
+  communicate with that supervisor. Headless and Agent SDK sessions are also
+  outside the supported runtime.
+
+Claude's regular TUI and Agent View share the same project transcript storage.
+A stopped Agent View conversation can therefore appear in saved-session
+results, but the picker does not track its supervisor state or attach to it as
+an Agent View job. Opening it from the picker always creates a dedicated tmux
+session and invokes `claude --resume`.
 
 ## Requirements
 
