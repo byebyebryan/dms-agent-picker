@@ -13,6 +13,7 @@ import dms_agent_picker as picker
 THREAD_A = "00000000-0000-0000-0000-000000000001"
 THREAD_B = "00000000-0000-0000-0000-000000000002"
 THREAD_C = "00000000-0000-0000-0000-000000000003"
+THREAD_D = "00000000-0000-0000-0000-000000000004"
 
 
 class MergeHostResultsTest(unittest.TestCase):
@@ -250,6 +251,7 @@ class ClaudeSessionTest(unittest.TestCase):
                                 "type": "user",
                                 "sessionId": THREAD_C,
                                 "cwd": "/home/test/code/app",
+                                "entrypoint": "cli",
                                 "message": {"role": "user", "content": "Initial request"},
                             }
                         ),
@@ -262,6 +264,18 @@ class ClaudeSessionTest(unittest.TestCase):
                             }
                         ),
                     ]
+                )
+                + "\n"
+            )
+            (project_dir / f"{THREAD_D}.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": THREAD_D,
+                        "cwd": "/home/test/.claude-mem/observer-sessions",
+                        "entrypoint": "sdk-cli",
+                        "message": {"role": "user", "content": "Observe sessions"},
+                    }
                 )
                 + "\n"
             )
@@ -287,6 +301,7 @@ class ClaudeSessionTest(unittest.TestCase):
                 result = picker.list_claude_sessions(picker.HostTarget(None), 20, 2.0)
 
         self.assertTrue(result["installed"])
+        self.assertEqual(1, len(result["sessions"]))
         self.assertEqual(THREAD_C, result["sessions"][0]["id"])
         self.assertEqual("Improve auth flow", result["sessions"][0]["name"])
         self.assertEqual("/home/test/code/app", result["sessions"][0]["cwd"])

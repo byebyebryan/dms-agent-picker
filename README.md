@@ -93,7 +93,8 @@ Claude conversations are discovered from
 `$CLAUDE_CONFIG_DIR/projects/*/*.jsonl`, or `~/.claude/projects/*/*.jsonl` when
 that variable is unset. Sessions created by this plugin carry their Claude UUID
 as tmux metadata, allowing later launcher queries to identify and reuse the
-exact active conversation.
+exact active conversation. Headless and Agent SDK sessions are omitted, matching
+Claude Code's interactive session picker.
 
 Under niri, the picker first focuses an existing terminal window attached to
 the same host and tmux session. It opens a new terminal only when no matching

@@ -24,7 +24,7 @@ DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -169,8 +169,6 @@ if projects_dir.is_dir():
             continue
         transcripts.append((modified, session_id, path))
 transcripts.sort(key=lambda item: (item[0], item[1]), reverse=True)
-if requested_id is None:
-    transcripts = transcripts[: max(limit * 3, limit)]
 
 candidate_ids = {item[1] for item in transcripts}
 history = {}
@@ -205,9 +203,12 @@ for modified, session_id, path in transcripts:
     cwd = str(history_item.get("cwd") or "")
     first_prompt = ""
     custom_title = ""
+    entrypoint = ""
     for entry in read_json_lines(path):
         if not cwd and isinstance(entry.get("cwd"), str):
             cwd = entry["cwd"]
+        if not entrypoint and isinstance(entry.get("entrypoint"), str):
+            entrypoint = entry["entrypoint"]
         if entry.get("type") == "custom-title":
             title = clean_text(entry.get("customTitle"))
             if title:
@@ -218,6 +219,8 @@ for modified, session_id, path in transcripts:
             and not entry.get("isMeta")
         ):
             first_prompt = message_text(entry.get("message"))
+    if entrypoint == "sdk-cli":
+        continue
     name = custom_title or str(history_item.get("name") or "") or first_prompt
     if not name:
         name = Path(cwd).name if cwd else "Claude " + session_id[:8]
