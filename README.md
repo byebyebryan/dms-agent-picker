@@ -48,6 +48,9 @@ Session data is preloaded once when the plugin starts, then refreshed
 asynchronously when the picker is queried and its cache is stale. The plugin
 does not poll SSH hosts continuously while the picker is closed.
 
+Launcher results use the right-side badge to identify Claude and Codex, while
+the subtitle shows the host, working directory, and session age.
+
 ## CLI
 
 List the 20 most recently prompted sessions:

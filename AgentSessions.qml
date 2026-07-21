@@ -171,7 +171,8 @@ Item {
             items.push({
                 name: session.name,
                 icon: session.active ? "material:terminal" : "material:history",
-                comment: agentName + " | " + session.host + " | " + shortenedPath(session.cwd)
+                badgeLabel: agentName,
+                comment: session.host + " | " + shortenedPath(session.cwd)
                     + " | " + age(session.recencyAt),
                 action: "agent:" + session.host + ":" + session.kind + ":" + session.id,
                 categories: ["Agent Sessions"],
