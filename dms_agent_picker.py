@@ -24,7 +24,7 @@ DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -515,6 +515,36 @@ def read_claude_session(
     return sessions[0]
 
 
+def _process_arguments(pid: int) -> list[str]:
+    try:
+        return (
+            Path(f"/proc/{pid}/cmdline")
+            .read_bytes()
+            .decode(errors="replace")
+            .split("\0")
+        )
+    except (FileNotFoundError, PermissionError, OSError):
+        return []
+
+
+def _is_shared_codex_app_server(arguments: Sequence[str]) -> bool:
+    try:
+        app_server_index = arguments.index("app-server")
+    except ValueError:
+        return False
+
+    server_arguments = arguments[app_server_index + 1 :]
+    for index, argument in enumerate(server_arguments):
+        endpoint: str | None = None
+        if argument == "--listen" and index + 1 < len(server_arguments):
+            endpoint = server_arguments[index + 1]
+        elif argument.startswith("--listen="):
+            endpoint = argument.partition("=")[2]
+        if endpoint is not None:
+            return endpoint not in {"stdio://", "off"}
+    return False
+
+
 def _process_table() -> tuple[dict[int, int], set[int], set[int]]:
     result = subprocess.run(
         ["ps", "-u", str(os.getuid()), "-o", "pid=,ppid=,comm="],
@@ -533,6 +563,8 @@ def _process_table() -> tuple[dict[int, int], set[int], set[int]]:
         parents[pid] = parent
         command = parts[2].lower()
         if "codex" in command:
+            if _is_shared_codex_app_server(_process_arguments(pid)):
+                continue
             codex_pids.add(pid)
         if "claude" in command:
             claude_pids.add(pid)
@@ -712,6 +744,23 @@ import subprocess
 from pathlib import Path
 
 uuid_pattern = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
+
+def is_shared_codex_app_server(arguments):
+    try:
+        app_server_index = arguments.index("app-server")
+    except ValueError:
+        return False
+    server_arguments = arguments[app_server_index + 1:]
+    for index, argument in enumerate(server_arguments):
+        endpoint = None
+        if argument == "--listen" and index + 1 < len(server_arguments):
+            endpoint = server_arguments[index + 1]
+        elif argument.startswith("--listen="):
+            endpoint = argument.partition("=")[2]
+        if endpoint is not None:
+            return endpoint not in {"stdio://", "off"}
+    return False
+
 ps = subprocess.run(
     ["ps", "-u", str(os.getuid()), "-o", "pid=,ppid=,comm="],
     check=True,
@@ -729,6 +778,12 @@ for line in ps.stdout.splitlines():
     parents[pid] = parent
     command = parts[2].lower()
     if "codex" in command:
+        try:
+            arguments = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+        except (FileNotFoundError, PermissionError, OSError):
+            arguments = []
+        if is_shared_codex_app_server(arguments):
+            continue
         codex_pids.add(pid)
     if "claude" in command:
         claude_pids.add(pid)
