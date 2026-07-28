@@ -29,6 +29,19 @@ Item {
 
     signal itemsChanged()
 
+    Timer {
+        id: launcherUpdateDebounce
+
+        interval: 25
+        repeat: false
+        onTriggered: {
+            if (root.pluginService && root.pluginService.requestLauncherUpdate)
+                root.pluginService.requestLauncherUpdate(root.pluginName);
+        }
+    }
+
+    onItemsChanged: launcherUpdateDebounce.restart()
+
     Component.onCompleted: {
         loadSettings();
         refresh();
