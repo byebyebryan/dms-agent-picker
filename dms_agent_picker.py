@@ -13,8 +13,8 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
@@ -51,6 +51,13 @@ class SshPolicy:
 
 
 DEFAULT_SSH_POLICY = SshPolicy()
+
+HostResult = tuple[
+    HostTarget,
+    list[dict[str, Any]] | Exception,
+    dict[str, Any] | Exception,
+    dict[str, Any] | Exception,
+]
 
 
 def _short_hostname(host: str) -> str:
@@ -962,14 +969,7 @@ def get_active_snapshot(
 
 
 def merge_host_results(
-    host_results: Sequence[
-        tuple[
-            HostTarget,
-            list[dict[str, Any]] | Exception,
-            dict[str, Any] | Exception,
-            dict[str, Any] | Exception,
-        ]
-    ],
+    host_results: Sequence[HostResult],
     limit: int,
     aliases: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -1086,14 +1086,11 @@ def merge_host_results(
     }
 
 
-def aggregate_sessions(
+def build_host_targets(
     hosts: Sequence[str],
-    limit: int,
-    timeout: float,
     include_local: bool = True,
     aliases: Mapping[str, str] | None = None,
-    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
-) -> dict[str, Any]:
+) -> list[HostTarget]:
     aliases = aliases or {}
     targets: list[HostTarget] = []
     if include_local:
@@ -1107,51 +1104,101 @@ def aggregate_sessions(
         for host in hosts
         if host.strip() and _short_hostname(host.strip()) not in local_names
     )
+    return targets
 
-    thread_results: dict[str, list[dict[str, Any]] | Exception] = {}
-    claude_results: dict[str, dict[str, Any] | Exception] = {}
-    active_results: dict[str, dict[str, Any] | Exception] = {}
+
+def _future_result(future: Any) -> Any:
+    try:
+        return future.result()
+    except (PickerError, OSError, subprocess.SubprocessError) as exc:
+        return exc
+
+
+def _iter_host_results(
+    targets: Sequence[HostTarget],
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy,
+) -> Iterator[tuple[int, HostResult]]:
     workers = max(1, min(12, len(targets) * 3))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        thread_futures = {
-            target.key: pool.submit(list_codex_threads, target, limit, timeout, ssh_policy)
-            for target in targets
-        }
-        claude_futures = {
-            target.key: pool.submit(list_claude_sessions, target, limit, timeout, ssh_policy)
-            for target in targets
-        }
-        active_futures = {
-            target.key: pool.submit(get_active_snapshot, target, timeout, ssh_policy)
-            for target in targets
-        }
-        for target in targets:
-            try:
-                thread_results[target.key] = thread_futures[target.key].result()
-            except (PickerError, OSError, subprocess.SubprocessError) as exc:
-                thread_results[target.key] = exc
-            try:
-                claude_results[target.key] = claude_futures[target.key].result()
-            except (PickerError, OSError, subprocess.SubprocessError) as exc:
-                claude_results[target.key] = exc
-            try:
-                active_results[target.key] = active_futures[target.key].result()
-            except (PickerError, OSError, subprocess.SubprocessError) as exc:
-                active_results[target.key] = exc
+        futures: dict[Any, tuple[int, str]] = {}
+        results: list[dict[str, Any]] = [{} for _ in targets]
+        for index, target in enumerate(targets):
+            futures[pool.submit(list_codex_threads, target, limit, timeout, ssh_policy)] = (
+                index,
+                "threads",
+            )
+            futures[pool.submit(list_claude_sessions, target, limit, timeout, ssh_policy)] = (
+                index,
+                "claude",
+            )
+            futures[pool.submit(get_active_snapshot, target, timeout, ssh_policy)] = (
+                index,
+                "active",
+            )
+
+        for future in as_completed(futures):
+            index, stage = futures[future]
+            results[index][stage] = _future_result(future)
+            if len(results[index]) != 3:
+                continue
+            target = targets[index]
+            yield (
+                index,
+                (
+                    target,
+                    results[index]["threads"],
+                    results[index]["claude"],
+                    results[index]["active"],
+                ),
+            )
+
+
+def aggregate_sessions(
+    hosts: Sequence[str],
+    limit: int,
+    timeout: float,
+    include_local: bool = True,
+    aliases: Mapping[str, str] | None = None,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
+    aliases = aliases or {}
+    targets = build_host_targets(hosts, include_local=include_local, aliases=aliases)
+    completed: dict[int, HostResult] = {}
+    for index, result in _iter_host_results(targets, limit, timeout, ssh_policy):
+        completed[index] = result
 
     return merge_host_results(
-        [
-            (
-                target,
-                thread_results[target.key],
-                claude_results[target.key],
-                active_results[target.key],
-            )
-            for target in targets
-        ],
+        [completed[index] for index in range(len(targets))],
         limit,
         aliases,
     )
+
+
+def stream_session_events(
+    hosts: Sequence[str],
+    limit: int,
+    timeout: float,
+    include_local: bool = True,
+    aliases: Mapping[str, str] | None = None,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> Iterator[dict[str, Any]]:
+    aliases = aliases or {}
+    targets = build_host_targets(hosts, include_local=include_local, aliases=aliases)
+    yield {"event": "refresh-started", "hosts": [target.key for target in targets]}
+
+    for _, result in _iter_host_results(targets, limit, timeout, ssh_policy):
+        target = result[0]
+        host_payload = merge_host_results([result], limit, aliases)
+        yield {
+            "event": "host-complete",
+            "host": target.key,
+            "sessions": host_payload["sessions"],
+            "errors": host_payload["errors"],
+        }
+
+    yield {"event": "refresh-finished", "generatedAt": int(time.time())}
 
 
 def _safe_tmux_name(name: str, thread_id: str) -> str:
@@ -1494,6 +1541,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     list_parser.add_argument("--no-local", action="store_true")
+    list_parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="emit per-host discovery events as JSONL",
+    )
 
     active_parser = subparsers.add_parser("active", help="show active local agent sessions as JSON")
     active_parser.set_defaults(command="active")
@@ -1532,6 +1584,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.limit < 1 or args.limit > 200:
                 raise PickerError("limit must be between 1 and 200")
             aliases = parse_host_aliases(args.alias)
+            if args.stream:
+                for event in stream_session_events(
+                    args.host,
+                    args.limit,
+                    args.timeout,
+                    include_local=not args.no_local,
+                    aliases=aliases,
+                    ssh_policy=ssh_policy,
+                ):
+                    print(json.dumps(event, separators=(",", ":")), flush=True)
+                return 0
             payload = aggregate_sessions(
                 args.host,
                 args.limit,

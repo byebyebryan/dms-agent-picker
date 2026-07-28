@@ -76,8 +76,10 @@ SSH connection timeout and retry count are configurable. Their defaults are a
 enabled to prevent interactive authentication prompts.
 
 Session data is preloaded once when the plugin starts, then refreshed
-asynchronously when the picker is queried and its cache is stale. The plugin
-does not poll SSH hosts continuously while the picker is closed.
+asynchronously when the picker is queried and its cache is stale. Refreshes
+complete independently per host: cached sessions remain available while a host
+is refreshing, and each completed host updates the picker immediately. The
+plugin does not poll SSH hosts continuously while the picker is closed.
 
 Launcher results use the right-side badge to identify Claude and Codex, while
 the subtitle shows the host, working directory, session age, and activity
@@ -91,6 +93,18 @@ List the 20 most recently prompted sessions:
 ```sh
 dms-agent-picker list --host laptop.lan --limit 20 | jq
 ```
+
+For integrations that need per-host progress, opt into JSON Lines events. The
+stream starts with the configured connection targets, emits one
+`host-complete` event after that host's Codex, Claude, and activity probes have
+settled, then emits `refresh-finished`:
+
+```sh
+dms-agent-picker list --host laptop.lan --stream
+```
+
+The default `list` output remains one final JSON object for scripts that do
+not need incremental updates.
 
 Inspect active local agent sessions:
 

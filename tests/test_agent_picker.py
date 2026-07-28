@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -141,6 +143,125 @@ class ProjectMetadataTest(unittest.TestCase):
 
         self.assertEqual(picker.VERSION, plugin["version"])
         self.assertEqual(picker.VERSION, project["project"]["version"])
+
+
+class StreamingSessionTest(unittest.TestCase):
+    def test_stream_emits_completed_hosts_in_completion_order(self) -> None:
+        def sleep_for_local(target: picker.HostTarget) -> None:
+            if target.key == "local":
+                time.sleep(0.15)
+
+        def threads(
+            target: picker.HostTarget,
+            _limit: int,
+            _timeout: float,
+            _policy: picker.SshPolicy,
+        ) -> list[dict[str, object]]:
+            sleep_for_local(target)
+            return [
+                {
+                    "id": THREAD_B if target.key == "local" else THREAD_A,
+                    "name": target.key,
+                    "cwd": "/home/test",
+                    "recencyAt": 1,
+                }
+            ]
+
+        def claude(
+            target: picker.HostTarget,
+            _limit: int,
+            _timeout: float,
+            _policy: picker.SshPolicy,
+        ) -> dict[str, object]:
+            sleep_for_local(target)
+            return {"installed": False, "sessions": []}
+
+        def active(
+            target: picker.HostTarget,
+            _timeout: float,
+            _policy: picker.SshPolicy,
+        ) -> dict[str, object]:
+            sleep_for_local(target)
+            return {"host": target.key, "active": {}, "claudeActive": {}}
+
+        with (
+            mock.patch.object(picker, "list_codex_threads", side_effect=threads),
+            mock.patch.object(picker, "list_claude_sessions", side_effect=claude),
+            mock.patch.object(picker, "get_active_snapshot", side_effect=active),
+        ):
+            events = list(picker.stream_session_events(["fast.lan"], limit=20, timeout=1.0))
+
+        self.assertEqual({"event": "refresh-started", "hosts": ["local", "fast.lan"]}, events[0])
+        self.assertEqual(["fast.lan", "local"], [event["host"] for event in events[1:3]])
+        self.assertEqual("host-complete", events[1]["event"])
+        self.assertEqual(THREAD_A, events[1]["sessions"][0]["id"])
+        self.assertEqual("refresh-finished", events[3]["event"])
+        self.assertIn("generatedAt", events[3])
+
+    def test_stream_preserves_host_partial_failures(self) -> None:
+        with (
+            mock.patch.object(
+                picker,
+                "list_codex_threads",
+                side_effect=picker.PickerError("codex unavailable"),
+            ),
+            mock.patch.object(
+                picker,
+                "list_claude_sessions",
+                return_value={
+                    "installed": True,
+                    "sessions": [
+                        {
+                            "id": THREAD_C,
+                            "name": "Claude task",
+                            "cwd": "/home/test",
+                            "recencyAt": 2,
+                        }
+                    ],
+                },
+            ),
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={"host": "desktop", "active": {}, "claudeActive": {}},
+            ),
+        ):
+            events = list(
+                picker.stream_session_events([], limit=20, timeout=1.0, include_local=True)
+            )
+
+        event = events[1]
+        self.assertEqual("host-complete", event["event"])
+        self.assertEqual("local", event["host"])
+        self.assertEqual([THREAD_C], [session["id"] for session in event["sessions"]])
+        self.assertEqual("threads", event["errors"][0]["stage"])
+
+    def test_main_streams_jsonl_only_when_requested(self) -> None:
+        events = [
+            {"event": "refresh-started", "hosts": ["local"]},
+            {"event": "refresh-finished", "generatedAt": 1},
+        ]
+        output = io.StringIO()
+        with (
+            mock.patch.object(picker, "stream_session_events", return_value=iter(events)),
+            mock.patch.object(sys, "stdout", output),
+        ):
+            result = picker.main(["list", "--stream"])
+
+        self.assertEqual(0, result)
+        self.assertEqual(events, [json.loads(line) for line in output.getvalue().splitlines()])
+
+    def test_main_list_keeps_single_json_payload(self) -> None:
+        payload = {"generatedAt": 1, "sessions": [], "errors": []}
+        output = io.StringIO()
+        with (
+            mock.patch.object(picker, "aggregate_sessions", return_value=payload),
+            mock.patch.object(sys, "stdout", output),
+        ):
+            result = picker.main(["list"])
+
+        self.assertEqual(0, result)
+        self.assertEqual(payload, json.loads(output.getvalue()))
 
 
 class MergeHostResultsTest(unittest.TestCase):
