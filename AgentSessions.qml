@@ -19,6 +19,12 @@ Item {
     property int sshConnectionAttempts: 1
     property var sessions: []
     property var errors: []
+    property var hostSnapshots: ({})
+    property var refreshHosts: []
+    property var pendingHosts: []
+    property var refreshFailures: ({})
+    property bool receivedRefreshFinished: false
+    property bool streamMalformed: false
     property double lastRefreshMs: 0
 
     signal itemsChanged()
@@ -86,15 +92,26 @@ Item {
             .filter(alias => alias.length > 0);
     }
 
+    function requestedHostKeys() {
+        const requested = ["local"];
+        for (const host of configuredHosts()) {
+            if (!requested.includes(host))
+                requested.push(host);
+        }
+        return requested;
+    }
+
     function refresh() {
         if (listProcess.running)
             return;
+        beginRefresh(requestedHostKeys());
         const command = [
             helper,
             "--ssh-connect-timeout", String(sshConnectTimeout),
             "--ssh-connection-attempts", String(sshConnectionAttempts),
             "list",
-            "--limit", String(maxSessions)
+            "--limit", String(maxSessions),
+            "--stream"
         ];
         for (const host of configuredHosts())
             command.push("--host", host);
@@ -104,16 +121,160 @@ Item {
         listProcess.running = true;
     }
 
-    function applyResult(text) {
+    function beginRefresh(hostsToRefresh) {
+        const nextSnapshots = {};
+        for (const host of hostsToRefresh) {
+            if (hostSnapshots[host])
+                nextSnapshots[host] = hostSnapshots[host];
+        }
+        hostSnapshots = nextSnapshots;
+        refreshHosts = hostsToRefresh.slice();
+        pendingHosts = hostsToRefresh.slice();
+        refreshFailures = {};
+        receivedRefreshFinished = false;
+        streamMalformed = false;
+        rebuildResults();
+    }
+
+    function completeHost(host, result) {
+        if (!host || !refreshHosts.includes(host)) {
+            console.warn(pluginName + ": unexpected completed host: " + String(host));
+            streamMalformed = true;
+            return;
+        }
+        const nextSnapshots = {};
+        for (const key of Object.keys(hostSnapshots))
+            nextSnapshots[key] = hostSnapshots[key];
+        nextSnapshots[host] = {
+            sessions: Array.isArray(result.sessions) ? result.sessions : [],
+            errors: Array.isArray(result.errors) ? result.errors : []
+        };
+        hostSnapshots = nextSnapshots;
+        pendingHosts = pendingHosts.filter(candidate => candidate !== host);
+
+        const nextFailures = {};
+        for (const key of Object.keys(refreshFailures)) {
+            if (key !== host)
+                nextFailures[key] = refreshFailures[key];
+        }
+        refreshFailures = nextFailures;
+        rebuildResults();
+    }
+
+    function finishRefresh() {
+        if (pendingHosts.length > 0) {
+            streamMalformed = true;
+            console.warn(pluginName + ": helper finished with hosts still pending");
+            return;
+        }
+        receivedRefreshFinished = true;
+        lastRefreshMs = Date.now();
+        itemsChanged();
+    }
+
+    function failPendingRefresh(message) {
+        const affectedHosts = pendingHosts.length > 0 ? pendingHosts : refreshHosts;
+        if (affectedHosts.length === 0)
+            return;
+        const nextFailures = {};
+        for (const key of Object.keys(refreshFailures))
+            nextFailures[key] = refreshFailures[key];
+        for (const host of affectedHosts)
+            nextFailures[host] = message;
+        refreshFailures = nextFailures;
+        pendingHosts = [];
+        lastRefreshMs = 0;
+        itemsChanged();
+    }
+
+    function applyStreamEvent(line) {
+        const text = String(line).trim();
+        if (!text)
+            return;
         try {
-            const result = JSON.parse(text);
-            sessions = Array.isArray(result.sessions) ? result.sessions : [];
-            errors = Array.isArray(result.errors) ? result.errors : [];
-            lastRefreshMs = Date.now();
-            itemsChanged();
+            const event = JSON.parse(text);
+            if (!event || typeof event.event !== "string")
+                throw new Error("missing event name");
+            if (event.event === "refresh-started") {
+                if (!Array.isArray(event.hosts))
+                    throw new Error("refresh-started is missing hosts");
+                beginRefresh(event.hosts.map(host => String(host)));
+                return;
+            }
+            if (event.event === "host-complete") {
+                completeHost(String(event.host || ""), event);
+                return;
+            }
+            if (event.event === "refresh-finished") {
+                finishRefresh();
+                return;
+            }
+            throw new Error("unknown event " + event.event);
         } catch (error) {
+            streamMalformed = true;
             console.warn(pluginName + ": invalid helper output: " + String(error));
         }
+    }
+
+    function rebuildResults() {
+        const candidates = [];
+        const combinedErrors = [];
+        for (let hostIndex = 0; hostIndex < refreshHosts.length; hostIndex++) {
+            const host = refreshHosts[hostIndex];
+            const snapshot = hostSnapshots[host];
+            if (!snapshot)
+                continue;
+            const hostSessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
+            for (let sessionIndex = 0; sessionIndex < hostSessions.length; sessionIndex++) {
+                const session = hostSessions[sessionIndex];
+                if (session && typeof session === "object") {
+                    candidates.push({
+                        session: session,
+                        hostIndex: hostIndex,
+                        sessionIndex: sessionIndex
+                    });
+                }
+            }
+            const hostErrors = Array.isArray(snapshot.errors) ? snapshot.errors : [];
+            for (const error of hostErrors) {
+                if (error && typeof error === "object")
+                    combinedErrors.push(error);
+            }
+        }
+
+        candidates.sort((left, right) => {
+            const recencyDifference = Number(right.session.recencyAt || 0)
+                - Number(left.session.recencyAt || 0);
+            if (recencyDifference !== 0)
+                return recencyDifference;
+            const leftId = String(left.session.id || "");
+            const rightId = String(right.session.id || "");
+            if (leftId !== rightId)
+                return leftId < rightId ? 1 : -1;
+            if (left.hostIndex !== right.hostIndex)
+                return left.hostIndex - right.hostIndex;
+            return left.sessionIndex - right.sessionIndex;
+        });
+
+        const seen = {};
+        const mergedSessions = [];
+        for (const candidate of candidates) {
+            const session = candidate.session;
+            const sessionKey = [
+                String(session.windowHost || session.host || ""),
+                String(session.kind || ""),
+                String(session.id || "")
+            ].join("\u0000");
+            if (seen[sessionKey])
+                continue;
+            seen[sessionKey] = true;
+            mergedSessions.push(session);
+            if (mergedSessions.length >= maxSessions)
+                break;
+        }
+        sessions = mergedSessions;
+        errors = combinedErrors;
+        itemsChanged();
     }
 
     function shortenedPath(path) {
@@ -164,6 +325,27 @@ Item {
         return session.active ? "active" : "idle";
     }
 
+    function hostLabel(host) {
+        const snapshot = hostSnapshots[host];
+        if (snapshot && Array.isArray(snapshot.sessions)) {
+            for (const session of snapshot.sessions) {
+                if (session && session.host)
+                    return String(session.host);
+            }
+        }
+        return host;
+    }
+
+    function refreshIssues() {
+        return pendingHosts.map(host => ({
+            host: host,
+            name: "Refreshing " + hostLabel(host) + "…",
+            comment: "Showing the last known sessions while discovery runs",
+            badgeLabel: "Refreshing",
+            icon: "material:refresh"
+        }));
+    }
+
     function hostIssues() {
         const grouped = {};
         for (const error of errors) {
@@ -177,7 +359,18 @@ Item {
         }
 
         const issues = [];
+        for (const host of Object.keys(refreshFailures).sort()) {
+            issues.push({
+                host: host,
+                name: "Agent refresh unavailable",
+                comment: hostLabel(host) + " | " + refreshFailures[host],
+                badgeLabel: "Unavailable",
+                icon: "material:warning"
+            });
+        }
         for (const host of Object.keys(grouped).sort()) {
+            if (pendingHosts.includes(host) || refreshFailures[host])
+                continue;
             const stages = grouped[host];
             const activityUnavailable = stages.includes("active");
             const sessionsUnavailable = stages.includes("threads")
@@ -191,7 +384,9 @@ Item {
                     : "Agent activity unavailable",
                 comment: sessionsUnavailable
                     ? host + " | retrying on the next refresh"
-                    : host + " | activity state may be stale"
+                    : host + " | activity state may be stale",
+                badgeLabel: "Unavailable",
+                icon: "material:warning"
             });
         }
         return issues;
@@ -202,6 +397,32 @@ Item {
             refresh();
 
         const items = [];
+        let refreshIndex = 0;
+        for (const issue of refreshIssues()) {
+            if (!matches({
+                kind: "status",
+                name: issue.name,
+                host: issue.host,
+                connectHost: issue.host,
+                windowHost: issue.host,
+                cwd: "",
+                active: false
+            }, query)) {
+                continue;
+            }
+            items.push({
+                name: issue.name,
+                icon: issue.icon,
+                badgeLabel: issue.badgeLabel,
+                comment: issue.comment,
+                action: "agent:status:" + issue.host,
+                categories: ["Agent Sessions"],
+                _preScored: 4000 - refreshIndex,
+                _kind: "status"
+            });
+            refreshIndex += 1;
+        }
+
         let issueIndex = 0;
         for (const issue of hostIssues()) {
             if (!matches({
@@ -217,8 +438,8 @@ Item {
             }
             items.push({
                 name: issue.name,
-                icon: "material:warning",
-                badgeLabel: "Unavailable",
+                icon: issue.icon,
+                badgeLabel: issue.badgeLabel,
                 comment: issue.comment,
                 action: "agent:status:" + issue.host,
                 categories: ["Agent Sessions"],
@@ -297,10 +518,22 @@ Item {
         onExited: exitCode => {
             if (exitCode !== 0)
                 console.warn(root.pluginName + ": helper exited with " + exitCode);
+            if (!root.receivedRefreshFinished || root.pendingHosts.length > 0) {
+                const message = root.streamMalformed
+                    ? "helper emitted invalid refresh data"
+                    : exitCode === 0
+                        ? "helper ended before completing refresh"
+                        : "helper exited with " + exitCode;
+                root.failPendingRefresh(message);
+            } else if (root.streamMalformed) {
+                root.lastRefreshMs = 0;
+                root.itemsChanged();
+            }
         }
 
-        stdout: StdioCollector {
-            onStreamFinished: root.applyResult(text)
+        stdout: SplitParser {
+            splitMarker: "\n"
+            onRead: line => root.applyStreamEvent(line)
         }
 
         stderr: StdioCollector {

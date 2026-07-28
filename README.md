@@ -83,7 +83,8 @@ plugin does not poll SSH hosts continuously while the picker is closed.
 
 Launcher results use the right-side badge to identify Claude and Codex, while
 the subtitle shows the host, working directory, session age, and activity
-state. Hosts with unavailable session or activity queries appear as explicit
+state. Each host has a compact `Refreshing` status row while its probes are in
+flight. Hosts with unavailable session or activity queries appear as explicit
 warning items rather than silently disappearing from the picker.
 
 ## CLI
