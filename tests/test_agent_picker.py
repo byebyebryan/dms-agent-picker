@@ -162,6 +162,7 @@ class MergeHostResultsTest(unittest.TestCase):
         )
 
         self.assertFalse(result["sessions"][0]["active"])
+        self.assertEqual("unknown", result["sessions"][0]["activityState"])
         self.assertEqual("active", result["errors"][0]["stage"])
 
     def test_claude_session_survives_codex_list_failure(self) -> None:
@@ -207,6 +208,7 @@ class MergeHostResultsTest(unittest.TestCase):
                 "recencyAt": 80,
                 "updatedAt": 80,
                 "active": True,
+                "activityState": "active",
                 "tmuxSession": "improve-auth-flow",
             },
             result["sessions"][0],
@@ -488,6 +490,8 @@ class TmuxNameTest(unittest.TestCase):
 
         self.assertIn("$TMUX_PANE", wait_script)
         self.assertIn("#{session_attached}", wait_script)
+        self.assertIn("terminal did not attach in time", wait_script)
+        self.assertIn("tmux kill-session", wait_script)
         self.assertIn('exec "$@"', wait_script)
 
         codex_script = picker._ensure_session_script(THREAD_A, "project", "/home/test/code/project")
@@ -496,6 +500,10 @@ class TmuxNameTest(unittest.TestCase):
         )
         self.assertIn("codex_command=\"exec sh -c '$wait_script'", codex_script)
         self.assertIn("claude_command=\"exec sh -c '$wait_script'", claude_script)
+        self.assertIn("@agent_picker_waiting 1", codex_script)
+        self.assertIn("@agent_picker_waiting 1", claude_script)
+        self.assertIn("existing=$(tmux list-panes", codex_script)
+        self.assertIn("existing=$(tmux list-panes", claude_script)
 
     def test_remote_attach_quotes_exact_target_for_zsh(self) -> None:
         self.assertEqual(

@@ -70,7 +70,9 @@ asynchronously when the picker is queried and its cache is stale. The plugin
 does not poll SSH hosts continuously while the picker is closed.
 
 Launcher results use the right-side badge to identify Claude and Codex, while
-the subtitle shows the host, working directory, and session age.
+the subtitle shows the host, working directory, session age, and activity
+state. Hosts with unavailable session or activity queries appear as explicit
+warning items rather than silently disappearing from the picker.
 
 ## CLI
 
@@ -106,7 +108,9 @@ If the session is active in tmux, the picker attaches to that tmux session. If
 it is inactive, the picker creates a tmux session in the recorded working
 directory and resumes the selected UUID with `codex resume` or
 `claude --resume`. New agent processes wait for the terminal to attach before
-startup so terminal capability and color probes reach the actual terminal.
+startup so terminal capability and color probes reach the actual terminal. A
+session that is still waiting is reused by a second launch attempt; an
+unattached session expires after one minute rather than lingering indefinitely.
 
 On a local systemd desktop, session creation runs in a transient user scope so
 a newly created tmux server does not inherit `dms.service` and survives DMS

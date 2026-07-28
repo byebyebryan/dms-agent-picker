@@ -24,6 +24,7 @@ DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
+SESSION_ATTACH_TIMEOUT_SECONDS = 60
 VERSION = "0.3.3"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -985,10 +986,12 @@ def merge_host_results(
             canonical_host = target.key
             active_map: dict[str, Any] = {}
             claude_active_map: dict[str, Any] = {}
+            activity_known = False
         else:
             canonical_host = str(active_result.get("host") or target.key)
             active_map = active_result.get("active", {})
             claude_active_map = active_result.get("claudeActive", {})
+            activity_known = True
         display_host = aliases.get(_short_hostname(canonical_host), canonical_host)
 
         if isinstance(threads_result, Exception):
@@ -1013,6 +1016,11 @@ def merge_host_results(
                         "recencyAt": int(thread.get("recencyAt") or 0),
                         "updatedAt": int(thread.get("updatedAt") or 0),
                         "active": active_info is not None,
+                        "activityState": (
+                            "active"
+                            if active_info is not None
+                            else "idle" if activity_known else "unknown"
+                        ),
                         "tmuxSession": (
                             active_info.get("tmuxSession")
                             if isinstance(active_info, dict)
@@ -1045,6 +1053,11 @@ def merge_host_results(
                         "recencyAt": int(conversation.get("recencyAt") or 0),
                         "updatedAt": int(conversation.get("updatedAt") or 0),
                         "active": active_info is not None,
+                        "activityState": (
+                            "active"
+                            if active_info is not None
+                            else "idle" if activity_known else "unknown"
+                        ),
                         "tmuxSession": (
                             active_info.get("tmuxSession")
                             if isinstance(active_info, dict)
@@ -1147,9 +1160,16 @@ def _safe_tmux_name(name: str, thread_id: str) -> str:
 
 def _tmux_client_wait_script() -> str:
     return (
+        'session=$1; shift; '
+        f'deadline=$(( $(date +%s) + {SESSION_ATTACH_TIMEOUT_SECONDS} )); '
         'while :; do attached=$(tmux display-message -p -t "$TMUX_PANE" '
         '"#{session_attached}" 2>/dev/null || true); '
-        'case "$attached" in ""|0) sleep 0.05 ;; *) break ;; esac; done; '
+        'case "$attached" in ""|0) '
+        'if [ "$(date +%s)" -ge "$deadline" ]; then '
+        'printf "%s\\n" "dms-agent-picker: terminal did not attach in time" >&2; '
+        'tmux kill-session -t "=$session" 2>/dev/null || true; exit 1; fi; '
+        'sleep 0.05 ;; *) break ;; esac; done; '
+        'tmux set-option -t "=$session" @agent_picker_waiting 0; '
         'sleep 0.05; exec "$@"'
     )
 
@@ -1169,6 +1189,11 @@ codex_bin=$(command -v codex)
 if [ -z "$requested_cwd" ] || [ ! -d "$requested_cwd" ]; then
     requested_cwd=$HOME
 fi
+existing=$(tmux list-panes -a -F '#{{session_name}}\t#{{@codex_thread_id}}\t#{{@agent_picker_waiting}}' 2>/dev/null | awk -F '\t' -v id="$thread_id" '$2 == id && $3 == "1" {{ print $1; exit }}')
+if [ -n "$existing" ]; then
+    printf '%s\n' "$existing"
+    exit 0
+fi
 candidate=$base
 counter=0
 while tmux has-session -t "=$candidate" 2>/dev/null; do
@@ -1179,10 +1204,11 @@ while tmux has-session -t "=$candidate" 2>/dev/null; do
         candidate="${{base}}-${{short_id}}-$counter"
     fi
 done
-codex_command="exec sh -c '$wait_script' sh \"$codex_bin\" resume \"$thread_id\""
 tmux new-session -d -s "$candidate" -c "$requested_cwd"
 tmux set-option -t "$candidate" @codex_thread_id "$thread_id"
 tmux set-option -t "$candidate" @codex_name "$display_name"
+tmux set-option -t "$candidate" @agent_picker_waiting 1
+codex_command="exec sh -c '$wait_script' sh \"$candidate\" \"$codex_bin\" resume \"$thread_id\""
 tmux respawn-pane -k -t "$candidate:0.0" -c "$requested_cwd" "$codex_command"
 printf '%s\n' "$candidate"
 """
@@ -1262,6 +1288,11 @@ fi
 if [ -z "$requested_cwd" ] || [ ! -d "$requested_cwd" ]; then
     requested_cwd=$HOME
 fi
+existing=$(tmux list-panes -a -F '#{{session_name}}\t#{{@claude_session_id}}\t#{{@agent_picker_waiting}}' 2>/dev/null | awk -F '\t' -v id="$session_id" '$2 == id && $3 == "1" {{ print $1; exit }}')
+if [ -n "$existing" ]; then
+    printf '%s\n' "$existing"
+    exit 0
+fi
 candidate=$base
 counter=0
 while tmux has-session -t "=$candidate" 2>/dev/null; do
@@ -1272,10 +1303,11 @@ while tmux has-session -t "=$candidate" 2>/dev/null; do
         candidate="${{base}}-${{short_id}}-$counter"
     fi
 done
-claude_command="exec sh -c '$wait_script' sh \"$claude_bin\" --resume \"$session_id\""
 tmux new-session -d -s "$candidate" -c "$requested_cwd"
 tmux set-option -t "$candidate" @claude_session_id "$session_id"
 tmux set-option -t "$candidate" @claude_name "$display_name"
+tmux set-option -t "$candidate" @agent_picker_waiting 1
+claude_command="exec sh -c '$wait_script' sh \"$candidate\" \"$claude_bin\" --resume \"$session_id\""
 tmux respawn-pane -k -t "$candidate:0.0" -c "$requested_cwd" "$claude_command"
 printf '%s\n' "$candidate"
 """

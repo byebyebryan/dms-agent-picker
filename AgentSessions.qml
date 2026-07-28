@@ -158,11 +158,76 @@ Item {
         return haystack.includes(query.toLowerCase());
     }
 
+    function activityLabel(session) {
+        if (session.activityState === "unknown")
+            return "activity unknown";
+        return session.active ? "active" : "idle";
+    }
+
+    function hostIssues() {
+        const grouped = {};
+        for (const error of errors) {
+            if (!error || !error.host)
+                continue;
+            const host = String(error.host);
+            if (!grouped[host])
+                grouped[host] = [];
+            if (error.stage && !grouped[host].includes(error.stage))
+                grouped[host].push(error.stage);
+        }
+
+        const issues = [];
+        for (const host of Object.keys(grouped).sort()) {
+            const stages = grouped[host];
+            const activityUnavailable = stages.includes("active");
+            const sessionsUnavailable = stages.includes("threads")
+                && stages.includes("claude");
+            if (!activityUnavailable && !sessionsUnavailable)
+                continue;
+            issues.push({
+                host: host,
+                name: sessionsUnavailable
+                    ? "Agent sessions unavailable"
+                    : "Agent activity unavailable",
+                comment: sessionsUnavailable
+                    ? host + " | retrying on the next refresh"
+                    : host + " | activity state may be stale"
+            });
+        }
+        return issues;
+    }
+
     function getItems(query) {
         if (!listProcess.running && Date.now() - lastRefreshMs > refreshSeconds * 1000)
             refresh();
 
         const items = [];
+        let issueIndex = 0;
+        for (const issue of hostIssues()) {
+            if (!matches({
+                kind: "status",
+                name: issue.name,
+                host: issue.host,
+                connectHost: issue.host,
+                windowHost: issue.host,
+                cwd: "",
+                active: false
+            }, query)) {
+                continue;
+            }
+            items.push({
+                name: issue.name,
+                icon: "material:warning",
+                badgeLabel: "Unavailable",
+                comment: issue.comment,
+                action: "agent:status:" + issue.host,
+                categories: ["Agent Sessions"],
+                _preScored: 3000 - issueIndex,
+                _kind: "status"
+            });
+            issueIndex += 1;
+        }
+
         let index = 0;
         for (const session of sessions) {
             if (!matches(session, query))
@@ -170,10 +235,14 @@ Item {
             const agentName = session.kind === "claude" ? "Claude" : "Codex";
             items.push({
                 name: session.name,
-                icon: session.active ? "material:terminal" : "material:history",
+                icon: session.active
+                    ? "material:terminal"
+                    : session.activityState === "unknown"
+                        ? "material:help"
+                        : "material:history",
                 badgeLabel: agentName,
                 comment: session.host + " | " + shortenedPath(session.cwd)
-                    + " | " + age(session.recencyAt),
+                    + " | " + age(session.recencyAt) + " | " + activityLabel(session),
                 action: "agent:" + session.host + ":" + session.kind + ":" + session.id,
                 categories: ["Agent Sessions"],
                 _preScored: 2000 - index,
