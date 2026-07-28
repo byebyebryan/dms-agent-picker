@@ -84,9 +84,10 @@ cache TTL defaults to 30 seconds and can be configured from 5 to 300 seconds.
 
 Launcher results use the right-side badge to identify Claude and Codex, while
 the subtitle shows the host, working directory, session age, and activity
-state. Each host has a compact `Refreshing` status row while its probes are in
-flight. Hosts with unavailable session or activity queries appear as explicit
-warning items rather than silently disappearing from the picker.
+state. A single compact `Refreshing` status row names the hosts whose probes
+are still in flight. If discovery cannot reach a host or only returns partial
+details, that row becomes a warning for 10 seconds after refresh completion,
+then disappears rather than lingering in the picker.
 
 ## CLI
 

@@ -25,7 +25,9 @@ Item {
     property var refreshFailures: ({})
     property bool receivedRefreshFinished: false
     property bool streamMalformed: false
+    property bool showingUnavailableNotice: false
     property double lastRefreshMs: 0
+    readonly property int unavailableNoticeSeconds: 10
 
     signal itemsChanged()
 
@@ -37,6 +39,17 @@ Item {
         onTriggered: {
             if (root.pluginService && root.pluginService.requestLauncherUpdate)
                 root.pluginService.requestLauncherUpdate(root.pluginName);
+        }
+    }
+
+    Timer {
+        id: unavailableNoticeTimer
+
+        interval: root.unavailableNoticeSeconds * 1000
+        repeat: false
+        onTriggered: {
+            root.showingUnavailableNotice = false;
+            root.itemsChanged();
         }
     }
 
@@ -146,6 +159,8 @@ Item {
         refreshFailures = {};
         receivedRefreshFinished = false;
         streamMalformed = false;
+        showingUnavailableNotice = false;
+        unavailableNoticeTimer.stop();
         rebuildResults();
     }
 
@@ -182,6 +197,7 @@ Item {
         }
         receivedRefreshFinished = true;
         lastRefreshMs = Date.now();
+        updateUnavailableNotice();
         itemsChanged();
     }
 
@@ -197,6 +213,7 @@ Item {
         refreshFailures = nextFailures;
         pendingHosts = [];
         lastRefreshMs = 0;
+        updateUnavailableNotice();
         itemsChanged();
     }
 
@@ -346,20 +363,25 @@ Item {
                     return String(session.host);
             }
         }
+        const normalizedHost = String(host).toLowerCase();
+        for (const alias of configuredAliases()) {
+            const separator = alias.indexOf("=");
+            if (separator <= 0)
+                continue;
+            if (alias.slice(0, separator).trim().toLowerCase() === normalizedHost)
+                return alias.slice(separator + 1).trim() || host;
+        }
         return host;
     }
 
-    function refreshIssues() {
-        return pendingHosts.map(host => ({
-            host: host,
-            name: "Refreshing " + hostLabel(host) + "…",
-            comment: "Showing the last known sessions while discovery runs",
-            badgeLabel: "Refreshing",
-            icon: "material:refresh"
-        }));
+    function hostList(hostsToDisplay) {
+        const labels = hostsToDisplay.map(host => hostLabel(host));
+        if (labels.length <= 3)
+            return labels.join(", ");
+        return labels.slice(0, 3).join(", ") + " +" + String(labels.length - 3);
     }
 
-    function hostIssues() {
+    function hostProblems() {
         const grouped = {};
         for (const error of errors) {
             if (!error || !error.host)
@@ -371,16 +393,14 @@ Item {
                 grouped[host].push(error.stage);
         }
 
-        const issues = [];
-        for (const host of Object.keys(refreshFailures).sort()) {
-            issues.push({
-                host: host,
-                name: "Agent refresh unavailable",
-                comment: hostLabel(host) + " | " + refreshFailures[host],
-                badgeLabel: "Unavailable",
-                icon: "material:warning"
-            });
-        }
+        const problems = {
+            unreachable: [],
+            interrupted: [],
+            sessions: [],
+            activity: []
+        };
+        for (const host of Object.keys(refreshFailures).sort())
+            problems.interrupted.push(host);
         for (const host of Object.keys(grouped).sort()) {
             if (pendingHosts.includes(host) || refreshFailures[host])
                 continue;
@@ -388,21 +408,76 @@ Item {
             const activityUnavailable = stages.includes("active");
             const sessionsUnavailable = stages.includes("threads")
                 && stages.includes("claude");
-            if (!activityUnavailable && !sessionsUnavailable)
+            if (sessionsUnavailable && activityUnavailable) {
+                problems.unreachable.push(host);
                 continue;
-            issues.push({
-                host: host,
-                name: sessionsUnavailable
-                    ? "Agent sessions unavailable"
-                    : "Agent activity unavailable",
-                comment: sessionsUnavailable
-                    ? host + " | retrying on the next refresh"
-                    : host + " | activity state may be stale",
+            }
+            if (sessionsUnavailable)
+                problems.sessions.push(host);
+            if (activityUnavailable)
+                problems.activity.push(host);
+        }
+        return problems;
+    }
+
+    function hasHostProblems(problems) {
+        return problems.unreachable.length > 0
+            || problems.interrupted.length > 0
+            || problems.sessions.length > 0
+            || problems.activity.length > 0;
+    }
+
+    function hostProblemComment(problems) {
+        const details = [];
+        if (problems.unreachable.length > 0)
+            details.push(hostList(problems.unreachable) + " unreachable");
+        if (problems.interrupted.length > 0)
+            details.push("discovery interrupted for " + hostList(problems.interrupted));
+        if (problems.sessions.length > 0)
+            details.push("sessions unavailable on " + hostList(problems.sessions));
+        if (problems.activity.length > 0)
+            details.push("activity unknown on " + hostList(problems.activity));
+        return details.join("; ");
+    }
+
+    function updateUnavailableNotice() {
+        const problems = hostProblems();
+        showingUnavailableNotice = hasHostProblems(problems);
+        if (showingUnavailableNotice)
+            unavailableNoticeTimer.restart();
+        else
+            unavailableNoticeTimer.stop();
+    }
+
+    function statusIssue() {
+        const problems = hostProblems();
+        if (pendingHosts.length > 0) {
+            const refreshComment = "Checking " + hostList(pendingHosts)
+                + " | showing last known sessions";
+            const problemComment = hostProblemComment(problems);
+            return {
+                host: pendingHosts[0],
+                name: "Refreshing agent sessions…",
+                comment: problemComment.length > 0
+                    ? refreshComment + "; " + problemComment
+                    : refreshComment,
+                badgeLabel: "Refreshing",
+                icon: "material:refresh"
+            };
+        }
+        if (showingUnavailableNotice && hasHostProblems(problems)) {
+            return {
+                host: problems.unreachable[0] || problems.interrupted[0]
+                    || problems.sessions[0] || problems.activity[0],
+                name: problems.unreachable.length > 0
+                    ? "Agent host unavailable"
+                    : "Agent refresh unavailable",
+                comment: hostProblemComment(problems),
                 badgeLabel: "Unavailable",
                 icon: "material:warning"
-            });
+            };
         }
-        return issues;
+        return null;
     }
 
     function getItems(query) {
@@ -410,8 +485,8 @@ Item {
             refresh();
 
         const items = [];
-        let refreshIndex = 0;
-        for (const issue of refreshIssues()) {
+        const issue = statusIssue();
+        if (issue) {
             if (!matches({
                 kind: "status",
                 name: issue.name,
@@ -421,45 +496,17 @@ Item {
                 cwd: "",
                 active: false
             }, query)) {
-                continue;
+                items.push({
+                    name: issue.name,
+                    icon: issue.icon,
+                    badgeLabel: issue.badgeLabel,
+                    comment: issue.comment,
+                    action: "agent:status:" + issue.host,
+                    categories: ["Agent Sessions"],
+                    _preScored: 4000,
+                    _kind: "status"
+                });
             }
-            items.push({
-                name: issue.name,
-                icon: issue.icon,
-                badgeLabel: issue.badgeLabel,
-                comment: issue.comment,
-                action: "agent:status:" + issue.host,
-                categories: ["Agent Sessions"],
-                _preScored: 4000 - refreshIndex,
-                _kind: "status"
-            });
-            refreshIndex += 1;
-        }
-
-        let issueIndex = 0;
-        for (const issue of hostIssues()) {
-            if (!matches({
-                kind: "status",
-                name: issue.name,
-                host: issue.host,
-                connectHost: issue.host,
-                windowHost: issue.host,
-                cwd: "",
-                active: false
-            }, query)) {
-                continue;
-            }
-            items.push({
-                name: issue.name,
-                icon: issue.icon,
-                badgeLabel: issue.badgeLabel,
-                comment: issue.comment,
-                action: "agent:status:" + issue.host,
-                categories: ["Agent Sessions"],
-                _preScored: 3000 - issueIndex,
-                _kind: "status"
-            });
-            issueIndex += 1;
         }
 
         let index = 0;
