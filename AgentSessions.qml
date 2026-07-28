@@ -487,7 +487,7 @@ Item {
         const items = [];
         const issue = statusIssue();
         if (issue) {
-            if (!matches({
+            if (matches({
                 kind: "status",
                 name: issue.name,
                 host: issue.host,
