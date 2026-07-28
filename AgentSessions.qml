@@ -14,7 +14,7 @@ Item {
     property string aliases: ""
     property string terminal: Quickshell.env("TERMINAL") || "ghostty"
     property int maxSessions: 20
-    property int refreshSeconds: 15
+    property int refreshSeconds: 30
     property int sshConnectTimeout: 2
     property int sshConnectionAttempts: 1
     property var sessions: []
@@ -65,10 +65,10 @@ Item {
             20
         );
         refreshSeconds = boundedInteger(
-            pluginService.loadPluginData(pluginName, "refresh_seconds", 15),
+            pluginService.loadPluginData(pluginName, "refresh_seconds", 30),
             5,
             300,
-            15
+            30
         );
         sshConnectTimeout = boundedInteger(
             pluginService.loadPluginData(pluginName, "ssh_connect_timeout", 2),

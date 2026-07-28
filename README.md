@@ -79,7 +79,8 @@ Session data is preloaded once when the plugin starts, then refreshed
 asynchronously when the picker is queried and its cache is stale. Refreshes
 complete independently per host: cached sessions remain available while a host
 is refreshing, and each completed host updates the picker immediately. The
-plugin does not poll SSH hosts continuously while the picker is closed.
+plugin does not poll SSH hosts continuously while the picker is closed. The
+cache TTL defaults to 30 seconds and can be configured from 5 to 300 seconds.
 
 Launcher results use the right-side badge to identify Claude and Codex, while
 the subtitle shows the host, working directory, session age, and activity

@@ -57,8 +57,8 @@ PluginSettings {
         settingKey: "refresh_seconds"
         label: "Cache TTL"
         description: "Minimum seconds between on-demand session queries"
-        placeholder: "15"
-        defaultValue: "15"
+        placeholder: "30"
+        defaultValue: "30"
     }
 
     StringSetting {
