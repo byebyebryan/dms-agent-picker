@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
+import subprocess
+import sys
 import tempfile
+import tomllib
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import dms_agent_picker as picker
-
 
 THREAD_A = "00000000-0000-0000-0000-000000000001"
 THREAD_B = "00000000-0000-0000-0000-000000000002"
@@ -44,37 +46,27 @@ class CodexThreadTest(unittest.TestCase):
 
     def test_detects_only_persistent_app_server_transports(self) -> None:
         self.assertTrue(
-            picker._is_shared_codex_app_server(
-                ["codex", "app-server", "--listen", "unix://"]
-            )
+            picker._is_shared_codex_app_server(["codex", "app-server", "--listen", "unix://"])
         )
         self.assertTrue(
             picker._is_shared_codex_app_server(
                 ["codex", "app-server", "--listen=ws://127.0.0.1:4500"]
             )
         )
+        self.assertFalse(picker._is_shared_codex_app_server(["codex", "app-server", "--stdio"]))
         self.assertFalse(
-            picker._is_shared_codex_app_server(["codex", "app-server", "--stdio"])
-        )
-        self.assertFalse(
-            picker._is_shared_codex_app_server(
-                ["codex", "app-server", "--listen", "stdio://"]
-            )
+            picker._is_shared_codex_app_server(["codex", "app-server", "--listen", "stdio://"])
         )
 
     def test_active_probe_ignores_shared_app_server(self) -> None:
-        process_table = mock.Mock(
-            stdout="100 1 codex\n200 1 codex\n300 1 claude\n"
-        )
+        process_table = mock.Mock(stdout="100 1 codex\n200 1 codex\n300 1 claude\n")
         with (
             mock.patch.object(picker.subprocess, "run", return_value=process_table),
             mock.patch.object(
                 picker,
                 "_process_arguments",
                 side_effect=lambda pid: (
-                    ["codex", "app-server", "--listen", "unix://"]
-                    if pid == 100
-                    else ["codex"]
+                    ["codex", "app-server", "--listen", "unix://"] if pid == 100 else ["codex"]
                 ),
             ),
         ):
@@ -83,6 +75,72 @@ class CodexThreadTest(unittest.TestCase):
         self.assertEqual({100: 1, 200: 1, 300: 1}, parents)
         self.assertEqual({200}, codex_pids)
         self.assertEqual({300}, claude_pids)
+
+    def test_remote_active_probe_matches_managed_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            proc_root = root / "proc"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+
+            def write_cmdline(pid: int, arguments: list[str]) -> None:
+                process_dir = proc_root / str(pid)
+                process_dir.mkdir(parents=True)
+                (process_dir / "cmdline").write_bytes("\0".join(arguments).encode() + b"\0")
+
+            def link_fd(pid: int, descriptor: int, target: Path) -> None:
+                fd_dir = proc_root / str(pid) / "fd"
+                fd_dir.mkdir(parents=True, exist_ok=True)
+                (fd_dir / str(descriptor)).symlink_to(target)
+
+            write_cmdline(100, ["codex", "app-server", "--listen", "unix://"])
+            write_cmdline(200, ["codex"])
+            write_cmdline(300, ["claude", "--resume", THREAD_C])
+            link_fd(200, 3, root / f"rollout-2026-07-21T00-00-00-{THREAD_A}.jsonl")
+
+            (bin_dir / "ps").write_text(
+                "#!/bin/sh\nprintf '%s\\n' '100 1 codex' '200 400 codex' '300 500 claude'\n"
+            )
+            (bin_dir / "tmux").write_text(
+                "#!/bin/sh\n"
+                f"printf 'codex-picker\\t400\\t{THREAD_A}\\t\\n'\n"
+                f"printf 'claude-picker\\t500\\t\\t{THREAD_C}\\n'\n"
+            )
+            (bin_dir / "claude").write_text("#!/bin/sh\nexit 0\n")
+            for executable in bin_dir.iterdir():
+                executable.chmod(0o755)
+
+            environment = {
+                **os.environ,
+                "DMS_AGENT_PICKER_PROC_ROOT": str(proc_root),
+                "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+            }
+            result = subprocess.run(
+                [sys.executable, "-c", picker.ACTIVE_PROBE],
+                capture_output=True,
+                check=False,
+                env=environment,
+                text=True,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual({THREAD_A: {"pid": 200, "tmuxSession": "codex-picker"}}, payload["active"])
+        self.assertEqual(
+            {THREAD_C: {"pid": 300, "tmuxSession": "claude-picker"}},
+            payload["claudeActive"],
+        )
+        self.assertTrue(payload["claudeInstalled"])
+
+
+class ProjectMetadataTest(unittest.TestCase):
+    def test_version_metadata_is_synchronized(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        plugin = json.loads((root / "plugin.json").read_text())
+        project = tomllib.loads((root / "pyproject.toml").read_text())
+
+        self.assertEqual(picker.VERSION, plugin["version"])
+        self.assertEqual(picker.VERSION, project["project"]["version"])
 
 
 class MergeHostResultsTest(unittest.TestCase):
@@ -186,9 +244,7 @@ class MergeHostResultsTest(unittest.TestCase):
                     {
                         "host": "80H1VV3",
                         "active": {},
-                        "claudeActive": {
-                            THREAD_C: {"pid": 42, "tmuxSession": "improve-auth-flow"}
-                        },
+                        "claudeActive": {THREAD_C: {"pid": 42, "tmuxSession": "improve-auth-flow"}},
                     },
                 )
             ],
@@ -288,16 +344,18 @@ class OpenTargetTest(unittest.TestCase):
         ensure.assert_not_called()
 
     def test_active_session_outside_tmux_is_not_duplicated(self) -> None:
-        with mock.patch.object(
-            picker,
-            "get_active_snapshot",
-            return_value={
-                "host": "desktop",
-                "active": {THREAD_A: {"pid": 10, "tmuxSession": None}},
-            },
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "desktop",
+                    "active": {THREAD_A: {"pid": 10, "tmuxSession": None}},
+                },
+            ),
+            self.assertRaisesRegex(picker.PickerError, "outside tmux"),
         ):
-            with self.assertRaisesRegex(picker.PickerError, "outside tmux"):
-                picker.resolve_open_target(picker.HostTarget(None), THREAD_A, "cubey", "/tmp", 1.0)
+            picker.resolve_open_target(picker.HostTarget(None), THREAD_A, "cubey", "/tmp", 1.0)
 
 
 class ClaudeSessionTest(unittest.TestCase):
@@ -425,20 +483,22 @@ class ClaudeSessionTest(unittest.TestCase):
         ensure.assert_not_called()
 
     def test_active_claude_outside_tmux_is_not_duplicated(self) -> None:
-        with mock.patch.object(
-            picker,
-            "get_active_snapshot",
-            return_value={
-                "host": "desktop",
-                "active": {},
-                "claudeInstalled": True,
-                "claudeActive": {THREAD_C: {"pid": 42, "tmuxSession": None}},
-            },
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "desktop",
+                    "active": {},
+                    "claudeInstalled": True,
+                    "claudeActive": {THREAD_C: {"pid": 42, "tmuxSession": None}},
+                },
+            ),
+            self.assertRaisesRegex(picker.PickerError, "outside tmux"),
         ):
-            with self.assertRaisesRegex(picker.PickerError, "outside tmux"):
-                picker.resolve_claude_open_target(
-                    picker.HostTarget(None), THREAD_C, "Improve auth flow", "/tmp", 1.0
-                )
+            picker.resolve_claude_open_target(
+                picker.HostTarget(None), THREAD_C, "Improve auth flow", "/tmp", 1.0
+            )
 
     def test_inactive_claude_creates_managed_session(self) -> None:
         with (

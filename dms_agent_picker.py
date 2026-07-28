@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Aggregate and open Codex and Claude Code sessions from local and SSH hosts."""
 
 from __future__ import annotations
@@ -14,18 +13,18 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-
+from typing import Any, Self
 
 DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
 SESSION_ATTACH_TIMEOUT_SECONDS = 60
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -360,7 +359,7 @@ class AppServerClient:
         finally:
             self._selector.close()
 
-    def __enter__(self) -> AppServerClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -518,12 +517,7 @@ def read_claude_session(
 
 def _process_arguments(pid: int) -> list[str]:
     try:
-        return (
-            Path(f"/proc/{pid}/cmdline")
-            .read_bytes()
-            .decode(errors="replace")
-            .split("\0")
-        )
+        return Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
     except (FileNotFoundError, PermissionError, OSError):
         return []
 
@@ -602,6 +596,7 @@ def _tmux_panes() -> tuple[dict[int, str], dict[str, str], dict[str, str]]:
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         return {}, {}, {}
@@ -745,6 +740,7 @@ import subprocess
 from pathlib import Path
 
 uuid_pattern = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
+proc_root = Path(os.environ.get("DMS_AGENT_PICKER_PROC_ROOT", "/proc"))
 
 def is_shared_codex_app_server(arguments):
     try:
@@ -780,7 +776,7 @@ for line in ps.stdout.splitlines():
     command = parts[2].lower()
     if "codex" in command:
         try:
-            arguments = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+            arguments = (proc_root / str(pid) / "cmdline").read_bytes().decode(errors="replace").split("\0")
         except (FileNotFoundError, PermissionError, OSError):
             arguments = []
         if is_shared_codex_app_server(arguments):
@@ -832,7 +828,7 @@ def tmux_session_for_process(pid):
 for pid in codex_pids:
     thread_id = None
     try:
-        entries = list(Path(f"/proc/{pid}/fd").iterdir())
+        entries = list((proc_root / str(pid) / "fd").iterdir())
     except (FileNotFoundError, PermissionError):
         entries = []
     for entry in entries:
@@ -872,14 +868,14 @@ def claude_session_id_from_args(arguments):
 
 def claude_session_id_for_process(pid):
     try:
-        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+        arguments = (proc_root / str(pid) / "cmdline").read_bytes().decode(errors="replace").split("\0")
     except (FileNotFoundError, PermissionError, OSError):
         arguments = []
     session_id = claude_session_id_from_args(arguments)
     if session_id is not None:
         return session_id
     try:
-        entries = list(Path(f"/proc/{pid}/fd").iterdir())
+        entries = list((proc_root / str(pid) / "fd").iterdir())
     except (FileNotFoundError, PermissionError):
         entries = []
     for entry in entries:
@@ -934,6 +930,7 @@ def remote_active_snapshot(
             input=ACTIVE_PROBE,
             capture_output=True,
             text=True,
+            check=False,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
@@ -1019,7 +1016,9 @@ def merge_host_results(
                         "activityState": (
                             "active"
                             if active_info is not None
-                            else "idle" if activity_known else "unknown"
+                            else "idle"
+                            if activity_known
+                            else "unknown"
                         ),
                         "tmuxSession": (
                             active_info.get("tmuxSession")
@@ -1056,7 +1055,9 @@ def merge_host_results(
                         "activityState": (
                             "active"
                             if active_info is not None
-                            else "idle" if activity_known else "unknown"
+                            else "idle"
+                            if activity_known
+                            else "unknown"
                         ),
                         "tmuxSession": (
                             active_info.get("tmuxSession")
@@ -1127,15 +1128,15 @@ def aggregate_sessions(
         for target in targets:
             try:
                 thread_results[target.key] = thread_futures[target.key].result()
-            except Exception as exc:  # Keep other hosts usable.
+            except (PickerError, OSError, subprocess.SubprocessError) as exc:
                 thread_results[target.key] = exc
             try:
                 claude_results[target.key] = claude_futures[target.key].result()
-            except Exception as exc:  # Claude is optional on every host.
+            except (PickerError, OSError, subprocess.SubprocessError) as exc:
                 claude_results[target.key] = exc
             try:
                 active_results[target.key] = active_futures[target.key].result()
-            except Exception as exc:  # Active state is optional list metadata.
+            except (PickerError, OSError, subprocess.SubprocessError) as exc:
                 active_results[target.key] = exc
 
     return merge_host_results(
@@ -1160,15 +1161,15 @@ def _safe_tmux_name(name: str, thread_id: str) -> str:
 
 def _tmux_client_wait_script() -> str:
     return (
-        'session=$1; shift; '
-        f'deadline=$(( $(date +%s) + {SESSION_ATTACH_TIMEOUT_SECONDS} )); '
+        "session=$1; shift; "
+        f"deadline=$(( $(date +%s) + {SESSION_ATTACH_TIMEOUT_SECONDS} )); "
         'while :; do attached=$(tmux display-message -p -t "$TMUX_PANE" '
         '"#{session_attached}" 2>/dev/null || true); '
         'case "$attached" in ""|0) '
         'if [ "$(date +%s)" -ge "$deadline" ]; then '
         'printf "%s\\n" "dms-agent-picker: terminal did not attach in time" >&2; '
         'tmux kill-session -t "=$session" 2>/dev/null || true; exit 1; fi; '
-        'sleep 0.05 ;; *) break ;; esac; done; '
+        "sleep 0.05 ;; *) break ;; esac; done; "
         'tmux set-option -t "=$session" @agent_picker_waiting 0; '
         'sleep 0.05; exec "$@"'
     )

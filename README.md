@@ -50,6 +50,16 @@ automatically where it is installed.
 
 ## Install
 
+The maintainer workstation deploys this plugin as a version-pinned chezmoi
+archive. The normal release flow is: commit and push this repository, update
+the archive URL and checksum in the chezmoi external declaration, then apply
+chezmoi. This keeps the live DMS plugin independent from an in-progress working
+tree.
+
+`install.sh` is only for a first-time unmanaged checkout. It refuses to replace
+an existing plugin directory, so it cannot accidentally bypass a pinned
+deployment.
+
 ```sh
 ./install.sh
 dms ipc call plugin-scan scan
