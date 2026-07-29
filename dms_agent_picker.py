@@ -1598,6 +1598,7 @@ def launch_attach(
     session: str,
     terminal: str,
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+    detach: bool = False,
 ) -> None:
     if target.connect_host is None:
         inner = ["tmux", "attach-session", "-t", f"={session}"]
@@ -1607,6 +1608,18 @@ def launch_attach(
 
     command = _terminal_command(terminal, inner)
     command = _local_scope_command(command)
+    if detach:
+        try:
+            subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise PickerError(f"failed to launch terminal: {exc}") from exc
+        return
     os.execvp(command[0], command)
 
 
@@ -1664,6 +1677,11 @@ def build_parser() -> argparse.ArgumentParser:
     open_parser.add_argument("--name")
     open_parser.add_argument("--cwd")
     open_parser.add_argument("--terminal", default=os.environ.get("TERMINAL", "ghostty"))
+    open_parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="detach the terminal after resolving the session",
+    )
 
     claude_parser = subparsers.add_parser("open-claude", help="open or resume a Claude session")
     claude_parser.add_argument("--host", default="local")
@@ -1672,6 +1690,11 @@ def build_parser() -> argparse.ArgumentParser:
     claude_parser.add_argument("--name")
     claude_parser.add_argument("--cwd")
     claude_parser.add_argument("--terminal", default=os.environ.get("TERMINAL", "ghostty"))
+    claude_parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="detach the terminal after resolving the session",
+    )
 
     return parser
 
@@ -1742,7 +1765,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         window_host = args.window_host or target.connect_host or socket.gethostname()
         if focus_existing_window(session, window_host, args.timeout):
             return 0
-        launch_attach(target, session, args.terminal, ssh_policy)
+        launch_attach(target, session, args.terminal, ssh_policy, detach=args.detach)
         return 0
     except PickerError as exc:
         print(f"dms-agent-picker: {exc}", file=sys.stderr)

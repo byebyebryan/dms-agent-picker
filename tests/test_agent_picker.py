@@ -477,6 +477,17 @@ class OpenTargetTest(unittest.TestCase):
         self.assertEqual("cubey", session)
         ensure.assert_not_called()
 
+    def test_main_detaches_after_resolving_a_session(self) -> None:
+        with (
+            mock.patch.object(picker, "resolve_open_target", return_value="picker"),
+            mock.patch.object(picker, "focus_existing_window", return_value=False),
+            mock.patch.object(picker, "launch_attach") as launch_attach,
+        ):
+            exit_code = picker.main(["open", "--id", THREAD_A, "--detach"])
+
+        self.assertEqual(0, exit_code)
+        self.assertTrue(launch_attach.call_args.kwargs["detach"])
+
     def test_active_session_outside_tmux_is_not_duplicated(self) -> None:
         with (
             mock.patch.object(
@@ -705,6 +716,11 @@ class TmuxNameTest(unittest.TestCase):
             picker._remote_attach_command("desktop-config"),
         )
 
+    def test_open_parser_accepts_detached_launches(self) -> None:
+        args = picker.build_parser().parse_args(["open", "--id", THREAD_A, "--detach"])
+
+        self.assertTrue(args.detach)
+
 
 class TmuxProcessBoundaryTest(unittest.TestCase):
     def test_local_tmux_creation_uses_a_systemd_scope(self) -> None:
@@ -749,6 +765,34 @@ class TmuxProcessBoundaryTest(unittest.TestCase):
 
         self.assertEqual(["ssh-prefix", "remote.lan", "sh -lc 'echo remote'"], command)
         which.assert_not_called()
+
+    def test_detached_attach_starts_terminal_in_a_new_session(self) -> None:
+        command = ["ghostty", "-e", "tmux", "attach-session", "-t", "=picker"]
+        with (
+            mock.patch.object(picker, "_terminal_command", return_value=command),
+            mock.patch.object(picker, "_local_scope_command", return_value=command),
+            mock.patch.object(picker.subprocess, "Popen") as popen,
+        ):
+            picker.launch_attach(picker.HostTarget(None), "picker", "ghostty", detach=True)
+
+        popen.assert_called_once_with(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def test_attached_launch_replaces_the_helper_process(self) -> None:
+        command = ["ghostty", "-e", "tmux", "attach-session", "-t", "=picker"]
+        with (
+            mock.patch.object(picker, "_terminal_command", return_value=command),
+            mock.patch.object(picker, "_local_scope_command", return_value=command),
+            mock.patch.object(picker.os, "execvp") as execvp,
+        ):
+            picker.launch_attach(picker.HostTarget(None), "picker", "ghostty")
+
+        execvp.assert_called_once_with(command[0], command)
 
 
 class NiriWindowTest(unittest.TestCase):

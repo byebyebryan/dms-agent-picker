@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Services
 
 Item {
     id: root
@@ -575,33 +576,58 @@ Item {
     function executeItem(item) {
         if (!item || !item._threadId)
             return;
-        if (item._kind === "claude") {
-            Quickshell.execDetached([
-                helper,
-                "--ssh-connect-timeout", String(sshConnectTimeout),
-                "--ssh-connection-attempts", String(sshConnectionAttempts),
-                "open-claude",
-                "--host", item._route || item._connectHost,
-                "--window-host", item._windowHost,
-                "--id", item._threadId,
-                "--name", item._name,
-                "--cwd", item._cwd,
-                "--terminal", terminal
-            ]);
+        if (openProcess.running) {
+            ToastService.showWarning(
+                "Agent Picker",
+                "Another session is still being prepared"
+            );
             return;
         }
-        Quickshell.execDetached([
+        const command = [
             helper,
             "--ssh-connect-timeout", String(sshConnectTimeout),
             "--ssh-connection-attempts", String(sshConnectionAttempts),
-            "open",
+            item._kind === "claude" ? "open-claude" : "open",
             "--host", item._route || item._connectHost,
             "--window-host", item._windowHost,
             "--id", item._threadId,
             "--name", item._name,
             "--cwd", item._cwd,
-            "--terminal", terminal
-        ]);
+            "--terminal", terminal,
+            "--detach"
+        ];
+        openProcess.errorText = "";
+        openProcess.targetName = item._name || "session";
+        openProcess.command = command;
+        openProcess.running = true;
+    }
+
+    Process {
+        id: openProcess
+
+        property string errorText: ""
+        property string targetName: "session"
+
+        running: false
+
+        onExited: exitCode => {
+            if (exitCode === 0)
+                return;
+            Qt.callLater(() => {
+                const detail = errorText || "helper exited with " + exitCode;
+                console.warn(root.pluginName + ": failed to open " + targetName + ": " + detail);
+                ToastService.showError(
+                    "Agent Picker could not open " + targetName,
+                    detail,
+                    "",
+                    "agent-picker-open"
+                );
+            });
+        }
+
+        stderr: StdioCollector {
+            onStreamFinished: openProcess.errorText = text.trim()
+        }
     }
 
     Process {

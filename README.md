@@ -161,6 +161,11 @@ a newly created tmux server does not inherit `dms.service` and survives DMS
 reloads or restarts. Systems without `systemd-run` retain the direct-launch
 fallback, and remote session creation remains owned by the remote host.
 
+When launched from DMS, the helper resolves the session before it detaches the
+terminal. Failures to resolve a route, create or reuse tmux, or start the
+terminal process are therefore shown as a DMS error toast instead of
+disappearing into a detached process.
+
 Claude conversations are discovered from
 `$CLAUDE_CONFIG_DIR/projects/*/*.jsonl`, or `~/.claude/projects/*/*.jsonl` when
 that variable is unset. Sessions created by this plugin carry their Claude UUID
