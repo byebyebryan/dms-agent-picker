@@ -532,7 +532,10 @@ Item {
                     comment: issue.comment,
                     action: "agent:status:" + issue.host,
                     categories: ["Agent Picker"],
-                    _preScored: 4000,
+                    // DMS launcher plugins expose only selectable result rows.
+                    // Keep the informational row directly after the first
+                    // session so initial keyboard focus remains actionable.
+                    _preScored: 1999,
                     _kind: "status"
                 });
             }
