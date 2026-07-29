@@ -907,9 +907,7 @@ class HostConfigTest(unittest.TestCase):
         self.assertEqual({"local", "starship.lan", "carbon.lan"}, queried_hosts)
 
     def test_routes_skip_the_current_logical_host(self) -> None:
-        routes = picker.parse_host_routes(
-            ["snap=snap.wg.lan|snap.lan", "starship=starship.lan"]
-        )
+        routes = picker.parse_host_routes(["snap=snap.wg.lan|snap.lan", "starship=starship.lan"])
         with mock.patch.object(picker.socket, "gethostname", return_value="80H1VV3"):
             targets = picker.build_host_targets(
                 [],

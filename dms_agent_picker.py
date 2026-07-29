@@ -105,9 +105,7 @@ def parse_host_routes(values: Sequence[str]) -> list[HostTarget]:
             name = name.strip()
             paths = tuple(path.strip() for path in raw_paths.split("|") if path.strip())
             if not separator or not name or not paths:
-                raise PickerError(
-                    f"invalid host route {entry!r}; expected name=endpoint|fallback"
-                )
+                raise PickerError(f"invalid host route {entry!r}; expected name=endpoint|fallback")
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
                 raise PickerError(f"invalid host route name {name!r}")
             if any(re.search(r"[\s,|=]", path) for path in paths):
@@ -1075,9 +1073,8 @@ def merge_host_results(
             active_map = active_result.get("active", {})
             claude_active_map = active_result.get("claudeActive", {})
             activity_known = True
-        display_host = (
-            target.route_key
-            or aliases.get(_short_hostname(canonical_host), canonical_host)
+        display_host = target.route_key or aliases.get(
+            _short_hostname(canonical_host), canonical_host
         )
 
         if isinstance(threads_result, Exception):
@@ -1109,9 +1106,7 @@ def merge_host_results(
                         else "unknown"
                     ),
                     "tmuxSession": (
-                        active_info.get("tmuxSession")
-                        if isinstance(active_info, dict)
-                        else None
+                        active_info.get("tmuxSession") if isinstance(active_info, dict) else None
                     ),
                 }
                 if target.route_spec:
@@ -1149,9 +1144,7 @@ def merge_host_results(
                         else "unknown"
                     ),
                     "tmuxSession": (
-                        active_info.get("tmuxSession")
-                        if isinstance(active_info, dict)
-                        else None
+                        active_info.get("tmuxSession") if isinstance(active_info, dict) else None
                     ),
                 }
                 if target.route_spec:
@@ -1223,9 +1216,7 @@ def _iter_host_results(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures: dict[Any, int] = {}
         for index, target in enumerate(targets):
-            futures[pool.submit(_collect_host_result, target, limit, timeout, ssh_policy)] = (
-                index
-            )
+            futures[pool.submit(_collect_host_result, target, limit, timeout, ssh_policy)] = index
         for future in as_completed(futures):
             yield futures[future], future.result()
 
