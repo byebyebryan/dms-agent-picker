@@ -27,7 +27,7 @@ Item {
     property bool streamMalformed: false
     property bool showingUnavailableNotice: false
     property double lastRefreshMs: 0
-    readonly property int unavailableNoticeSeconds: 10
+    readonly property int unavailableNoticeSeconds: 3
 
     signal itemsChanged()
 
