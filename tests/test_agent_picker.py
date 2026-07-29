@@ -790,6 +790,67 @@ class HostConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(picker.PickerError, "expected source=display"):
             picker.parse_host_aliases(["snap"])
 
+    def test_parses_logical_route_with_fallback_paths(self) -> None:
+        self.assertEqual(
+            [
+                picker.HostTarget(
+                    "snap.wg.lan",
+                    route_key="snap",
+                    route_paths=("snap.wg.lan", "snap.lan"),
+                )
+            ],
+            picker.parse_host_routes(["snap=snap.wg.lan|snap.lan"]),
+        )
+
+    def test_rejects_invalid_or_duplicate_logical_routes(self) -> None:
+        with self.assertRaisesRegex(picker.PickerError, "expected name=endpoint"):
+            picker.parse_host_routes(["snap"])
+        with self.assertRaisesRegex(picker.PickerError, "duplicate host route"):
+            picker.parse_host_routes(["snap=snap.wg.lan,snap=snap.lan"])
+
+    def test_uses_first_reachable_route_path(self) -> None:
+        route = picker.parse_host_routes(["snap=snap.wg.lan|snap.lan"])[0]
+        with mock.patch.object(
+            picker.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess([], 255, "", "network unreachable"),
+                subprocess.CompletedProcess([], 0, "", ""),
+            ],
+        ) as run:
+            resolved = picker.resolve_host_target(route, picker.SshPolicy())
+
+        self.assertEqual("snap", resolved.key)
+        self.assertEqual("snap.lan", resolved.connect_host)
+        self.assertEqual("snap=snap.wg.lan|snap.lan", resolved.route_spec)
+        self.assertEqual("snap.wg.lan", run.call_args_list[0].args[0][-2])
+        self.assertEqual("snap.lan", run.call_args_list[1].args[0][-2])
+
+    def test_route_results_keep_logical_name_and_reconnect_spec(self) -> None:
+        route = picker.HostTarget(
+            "snap.lan",
+            route_key="snap",
+            route_paths=("snap.wg.lan", "snap.lan"),
+        )
+        result = picker.merge_host_results(
+            [
+                (
+                    route,
+                    [{"id": THREAD_A, "name": "dotfiles", "cwd": "/home/test"}],
+                    {"installed": False, "sessions": []},
+                    {"host": "80H1VV3", "active": {}},
+                )
+            ],
+            limit=20,
+        )
+
+        self.assertEqual("snap", result["sessions"][0]["host"])
+        self.assertEqual("snap.lan", result["sessions"][0]["connectHost"])
+        self.assertEqual(
+            "snap=snap.wg.lan|snap.lan",
+            result["sessions"][0]["route"],
+        )
+
     def test_alias_changes_display_host_but_preserves_window_host(self) -> None:
         result = picker.merge_host_results(
             [
@@ -831,6 +892,19 @@ class HostConfigTest(unittest.TestCase):
 
         queried_hosts = {call.args[0].key for call in active.call_args_list}
         self.assertEqual({"local", "starship.lan", "carbon.lan"}, queried_hosts)
+
+    def test_routes_skip_the_current_logical_host(self) -> None:
+        routes = picker.parse_host_routes(
+            ["snap=snap.wg.lan|snap.lan", "starship=starship.lan"]
+        )
+        with mock.patch.object(picker.socket, "gethostname", return_value="80H1VV3"):
+            targets = picker.build_host_targets(
+                [],
+                aliases={"80h1vv3": "snap"},
+                routes=routes,
+            )
+
+        self.assertEqual(["local", "starship"], [target.key for target in targets])
 
 
 if __name__ == "__main__":

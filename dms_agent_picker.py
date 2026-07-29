@@ -38,10 +38,21 @@ class PickerError(RuntimeError):
 @dataclass(frozen=True)
 class HostTarget:
     connect_host: str | None
+    route_key: str | None = None
+    route_paths: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
-        return self.connect_host or "local"
+        return self.route_key or self.connect_host or "local"
+
+    @property
+    def route_spec(self) -> str | None:
+        if not self.route_key or not self.route_paths:
+            return None
+        return self.route_key + "=" + "|".join(self.route_paths)
+
+    def with_connect_host(self, connect_host: str) -> Self:
+        return HostTarget(connect_host, self.route_key, self.route_paths)
 
 
 @dataclass(frozen=True)
@@ -78,6 +89,44 @@ def parse_host_aliases(values: Sequence[str]) -> dict[str, str]:
                 raise PickerError(f"invalid host alias {entry!r}; expected source=display")
             aliases[_short_hostname(source)] = display
     return aliases
+
+
+def parse_host_routes(values: Sequence[str]) -> list[HostTarget]:
+    """Parse logical-host routes in ``name=endpoint|fallback`` form."""
+
+    routes: list[HostTarget] = []
+    seen_keys: set[str] = set()
+    for value in values:
+        for entry in value.replace("\n", ",").split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            name, separator, raw_paths = entry.partition("=")
+            name = name.strip()
+            paths = tuple(path.strip() for path in raw_paths.split("|") if path.strip())
+            if not separator or not name or not paths:
+                raise PickerError(
+                    f"invalid host route {entry!r}; expected name=endpoint|fallback"
+                )
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+                raise PickerError(f"invalid host route name {name!r}")
+            if any(re.search(r"[\s,|=]", path) for path in paths):
+                raise PickerError(f"invalid host route endpoint in {entry!r}")
+            normalized_key = name.casefold()
+            if normalized_key in seen_keys:
+                raise PickerError(f"duplicate host route {name!r}")
+            seen_keys.add(normalized_key)
+            routes.append(HostTarget(paths[0], name, paths))
+    return routes
+
+
+def parse_host_target(value: str) -> HostTarget:
+    value = value.strip()
+    if value in {"", "local"}:
+        return HostTarget(None)
+    if "=" in value:
+        return parse_host_routes([value])[0]
+    return HostTarget(value)
 
 
 CLAUDE_SESSION_PROBE = r"""
@@ -385,6 +434,42 @@ def _ssh_prefix(policy: SshPolicy) -> list[str]:
         "-o",
         "LogLevel=ERROR",
     ]
+
+
+def resolve_host_target(
+    target: HostTarget,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> HostTarget:
+    """Choose the first reachable path for a logical host route.
+
+    Legacy single-host targets keep their existing no-preflight behavior. A
+    route pays for at most one successful SSH handshake before its regular
+    Codex, Claude, and activity probes begin.
+    """
+
+    if not target.route_paths:
+        return target
+
+    failures: list[str] = []
+    for path in target.route_paths:
+        command = _ssh_prefix(ssh_policy) + [path, "true"]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=ssh_policy.connect_timeout + 2,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            failures.append(f"{path}: {exc}")
+            continue
+        if result.returncode == 0:
+            return target.with_connect_host(path)
+        detail = result.stderr.strip() or f"ssh exited with {result.returncode}"
+        failures.append(f"{path}: {detail}")
+
+    detail = "; ".join(failures)
+    raise PickerError(f"no reachable connection path for {target.key}: {detail}")
 
 
 def _local_scope_command(command: list[str]) -> list[str]:
@@ -989,7 +1074,10 @@ def merge_host_results(
             active_map = active_result.get("active", {})
             claude_active_map = active_result.get("claudeActive", {})
             activity_known = True
-        display_host = aliases.get(_short_hostname(canonical_host), canonical_host)
+        display_host = (
+            target.route_key
+            or aliases.get(_short_hostname(canonical_host), canonical_host)
+        )
 
         if isinstance(threads_result, Exception):
             errors.append({"host": target.key, "stage": "threads", "message": str(threads_result)})
@@ -1001,32 +1089,33 @@ def merge_host_results(
                 active_info = active_map.get(thread_id)
                 name = str(thread.get("name") or "").strip()
                 cwd = str(thread.get("cwd") or "").strip()
-                sessions.append(
-                    {
-                        "kind": "codex",
-                        "id": thread_id,
-                        "name": name or Path(cwd).name or thread_id[:8],
-                        "cwd": cwd,
-                        "host": display_host,
-                        "windowHost": canonical_host,
-                        "connectHost": target.key,
-                        "recencyAt": int(thread.get("recencyAt") or 0),
-                        "updatedAt": int(thread.get("updatedAt") or 0),
-                        "active": active_info is not None,
-                        "activityState": (
-                            "active"
-                            if active_info is not None
-                            else "idle"
-                            if activity_known
-                            else "unknown"
-                        ),
-                        "tmuxSession": (
-                            active_info.get("tmuxSession")
-                            if isinstance(active_info, dict)
-                            else None
-                        ),
-                    }
-                )
+                session = {
+                    "kind": "codex",
+                    "id": thread_id,
+                    "name": name or Path(cwd).name or thread_id[:8],
+                    "cwd": cwd,
+                    "host": display_host,
+                    "windowHost": canonical_host,
+                    "connectHost": target.connect_host or "local",
+                    "recencyAt": int(thread.get("recencyAt") or 0),
+                    "updatedAt": int(thread.get("updatedAt") or 0),
+                    "active": active_info is not None,
+                    "activityState": (
+                        "active"
+                        if active_info is not None
+                        else "idle"
+                        if activity_known
+                        else "unknown"
+                    ),
+                    "tmuxSession": (
+                        active_info.get("tmuxSession")
+                        if isinstance(active_info, dict)
+                        else None
+                    ),
+                }
+                if target.route_spec:
+                    session["route"] = target.route_spec
+                sessions.append(session)
 
         if isinstance(claude_result, Exception):
             errors.append({"host": target.key, "stage": "claude", "message": str(claude_result)})
@@ -1040,32 +1129,33 @@ def merge_host_results(
                 active_info = claude_active_map.get(session_id)
                 name = str(conversation.get("name") or "").strip()
                 cwd = str(conversation.get("cwd") or "").strip()
-                sessions.append(
-                    {
-                        "kind": "claude",
-                        "id": session_id,
-                        "name": name or Path(cwd).name or session_id[:8],
-                        "cwd": cwd,
-                        "host": display_host,
-                        "windowHost": canonical_host,
-                        "connectHost": target.key,
-                        "recencyAt": int(conversation.get("recencyAt") or 0),
-                        "updatedAt": int(conversation.get("updatedAt") or 0),
-                        "active": active_info is not None,
-                        "activityState": (
-                            "active"
-                            if active_info is not None
-                            else "idle"
-                            if activity_known
-                            else "unknown"
-                        ),
-                        "tmuxSession": (
-                            active_info.get("tmuxSession")
-                            if isinstance(active_info, dict)
-                            else None
-                        ),
-                    }
-                )
+                session = {
+                    "kind": "claude",
+                    "id": session_id,
+                    "name": name or Path(cwd).name or session_id[:8],
+                    "cwd": cwd,
+                    "host": display_host,
+                    "windowHost": canonical_host,
+                    "connectHost": target.connect_host or "local",
+                    "recencyAt": int(conversation.get("recencyAt") or 0),
+                    "updatedAt": int(conversation.get("updatedAt") or 0),
+                    "active": active_info is not None,
+                    "activityState": (
+                        "active"
+                        if active_info is not None
+                        else "idle"
+                        if activity_known
+                        else "unknown"
+                    ),
+                    "tmuxSession": (
+                        active_info.get("tmuxSession")
+                        if isinstance(active_info, dict)
+                        else None
+                    ),
+                }
+                if target.route_spec:
+                    session["route"] = target.route_spec
+                sessions.append(session)
 
     sessions.sort(key=lambda item: (item["recencyAt"], item["id"]), reverse=True)
     deduplicated: list[dict[str, Any]] = []
@@ -1090,6 +1180,7 @@ def build_host_targets(
     hosts: Sequence[str],
     include_local: bool = True,
     aliases: Mapping[str, str] | None = None,
+    routes: Sequence[HostTarget] = (),
 ) -> list[HostTarget]:
     aliases = aliases or {}
     targets: list[HostTarget] = []
@@ -1099,6 +1190,13 @@ def build_host_targets(
     local_alias = aliases.get(_short_hostname(socket.gethostname()))
     if local_alias:
         local_names.add(_short_hostname(local_alias))
+    if routes:
+        for route in routes:
+            route_names = {_short_hostname(route.key)}
+            route_names.update(_short_hostname(path) for path in route.route_paths)
+            if route_names.isdisjoint(local_names):
+                targets.append(route)
+        return targets
     targets.extend(
         HostTarget(host.strip())
         for host in hosts
@@ -1120,39 +1218,38 @@ def _iter_host_results(
     timeout: float,
     ssh_policy: SshPolicy,
 ) -> Iterator[tuple[int, HostResult]]:
-    workers = max(1, min(12, len(targets) * 3))
+    workers = max(1, min(4, len(targets)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures: dict[Any, tuple[int, str]] = {}
-        results: list[dict[str, Any]] = [{} for _ in targets]
+        futures: dict[Any, int] = {}
         for index, target in enumerate(targets):
-            futures[pool.submit(list_codex_threads, target, limit, timeout, ssh_policy)] = (
-                index,
-                "threads",
+            futures[pool.submit(_collect_host_result, target, limit, timeout, ssh_policy)] = (
+                index
             )
-            futures[pool.submit(list_claude_sessions, target, limit, timeout, ssh_policy)] = (
-                index,
-                "claude",
-            )
-            futures[pool.submit(get_active_snapshot, target, timeout, ssh_policy)] = (
-                index,
-                "active",
-            )
-
         for future in as_completed(futures):
-            index, stage = futures[future]
-            results[index][stage] = _future_result(future)
-            if len(results[index]) != 3:
-                continue
-            target = targets[index]
-            yield (
-                index,
-                (
-                    target,
-                    results[index]["threads"],
-                    results[index]["claude"],
-                    results[index]["active"],
-                ),
-            )
+            yield futures[future], future.result()
+
+
+def _collect_host_result(
+    target: HostTarget,
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy,
+) -> HostResult:
+    try:
+        resolved_target = resolve_host_target(target, ssh_policy)
+    except (PickerError, OSError, subprocess.SubprocessError) as exc:
+        return target, exc, exc, exc
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        threads = pool.submit(list_codex_threads, resolved_target, limit, timeout, ssh_policy)
+        claude = pool.submit(list_claude_sessions, resolved_target, limit, timeout, ssh_policy)
+        active = pool.submit(get_active_snapshot, resolved_target, timeout, ssh_policy)
+        return (
+            resolved_target,
+            _future_result(threads),
+            _future_result(claude),
+            _future_result(active),
+        )
 
 
 def aggregate_sessions(
@@ -1161,10 +1258,16 @@ def aggregate_sessions(
     timeout: float,
     include_local: bool = True,
     aliases: Mapping[str, str] | None = None,
+    routes: Sequence[HostTarget] = (),
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> dict[str, Any]:
     aliases = aliases or {}
-    targets = build_host_targets(hosts, include_local=include_local, aliases=aliases)
+    targets = build_host_targets(
+        hosts,
+        include_local=include_local,
+        aliases=aliases,
+        routes=routes,
+    )
     completed: dict[int, HostResult] = {}
     for index, result in _iter_host_results(targets, limit, timeout, ssh_policy):
         completed[index] = result
@@ -1182,10 +1285,16 @@ def stream_session_events(
     timeout: float,
     include_local: bool = True,
     aliases: Mapping[str, str] | None = None,
+    routes: Sequence[HostTarget] = (),
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> Iterator[dict[str, Any]]:
     aliases = aliases or {}
-    targets = build_host_targets(hosts, include_local=include_local, aliases=aliases)
+    targets = build_host_targets(
+        hosts,
+        include_local=include_local,
+        aliases=aliases,
+        routes=routes,
+    )
     yield {"event": "refresh-started", "hosts": [target.key for target in targets]}
 
     for _, result in _iter_host_results(targets, limit, timeout, ssh_policy):
@@ -1534,6 +1643,12 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="list agent sessions as JSON")
     list_parser.add_argument("--host", action="append", default=[])
     list_parser.add_argument(
+        "--route",
+        action="append",
+        default=[],
+        help="logical host route in name=endpoint|fallback form",
+    )
+    list_parser.add_argument(
         "--alias",
         action="append",
         default=[],
@@ -1584,6 +1699,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.limit < 1 or args.limit > 200:
                 raise PickerError("limit must be between 1 and 200")
             aliases = parse_host_aliases(args.alias)
+            routes = parse_host_routes(args.route)
             if args.stream:
                 for event in stream_session_events(
                     args.host,
@@ -1591,6 +1707,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.timeout,
                     include_local=not args.no_local,
                     aliases=aliases,
+                    routes=routes,
                     ssh_policy=ssh_policy,
                 ):
                     print(json.dumps(event, separators=(",", ":")), flush=True)
@@ -1601,6 +1718,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.timeout,
                 include_local=not args.no_local,
                 aliases=aliases,
+                routes=routes,
                 ssh_policy=ssh_policy,
             )
             print(json.dumps(payload, separators=(",", ":")))
@@ -1610,7 +1728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(active_snapshot(), separators=(",", ":")))
             return 0
 
-        target = HostTarget(None if args.host in {"", "local"} else args.host)
+        target = resolve_host_target(parse_host_target(args.host), ssh_policy)
         if args.command == "open-claude":
             session = resolve_claude_open_target(
                 target,

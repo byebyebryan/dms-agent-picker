@@ -66,10 +66,18 @@ dms ipc call plugin-scan scan
 dms ipc call plugins enable agentSessions
 ```
 
-Configure the launcher trigger and SSH hosts under DMS plugin settings. The
-local host is always included and is skipped when it also appears in the shared
-SSH host list. Optional aliases use `source=display` syntax, for example
-`80h1vv3=snap`.
+Configure the launcher trigger and host routes under DMS plugin settings. The
+settings file is local to each workstation and is not managed by chezmoi, so
+each machine can discover only the hosts it should consume. The local host is
+always included.
+
+Host Routes use comma-separated `name=preferred|fallback` entries, for example
+`snap=snap.wg.lan|snap.lan, starship=starship.lan`. The picker first chooses a
+reachable SSH path for each logical host, then runs its Codex, Claude, and
+activity probes against that single path. It displays the stable logical name
+(`snap` in the example) and retains the route when opening a selected session,
+so a later resume can use the fallback path too. Leave Host Routes empty to use
+the legacy SSH Hosts and Host Aliases settings.
 
 SSH connection timeout and retry count are configurable. Their defaults are a
 2-second connection timeout and one connection attempt; batch mode is always
@@ -95,6 +103,12 @@ List the 20 most recently prompted sessions:
 
 ```sh
 dms-agent-picker list --host laptop.lan --limit 20 | jq
+```
+
+Use a logical route with an ordered fallback path:
+
+```sh
+dms-agent-picker list --route 'snap=snap.wg.lan|snap.lan' --limit 20 | jq
 ```
 
 For integrations that need per-host progress, opt into JSON Lines events. The

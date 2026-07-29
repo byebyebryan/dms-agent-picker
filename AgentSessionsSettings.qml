@@ -25,16 +25,24 @@ PluginSettings {
 
     StringSetting {
         settingKey: "hosts"
-        label: "SSH Hosts"
-        description: "Comma-separated SSH hosts; the local machine is always included"
+        label: "Legacy SSH Hosts"
+        description: "Comma-separated SSH hosts; used only when Host Routes is empty"
         placeholder: "laptop.lan, server.lan"
         defaultValue: ""
     }
 
     StringSetting {
+        settingKey: "host_routes"
+        label: "Host Routes"
+        description: "Comma-separated name=preferred|fallback routes; the local machine is always included"
+        placeholder: "snap=snap.wg.lan|snap.lan, starship=starship.lan"
+        defaultValue: ""
+    }
+
+    StringSetting {
         settingKey: "aliases"
-        label: "Host Aliases"
-        description: "Comma-separated source=display mappings"
+        label: "Legacy Host Aliases"
+        description: "Comma-separated source=display mappings for Legacy SSH Hosts"
         placeholder: "80h1vv3=snap"
         defaultValue: ""
     }

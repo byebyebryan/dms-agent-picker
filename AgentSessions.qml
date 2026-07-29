@@ -11,6 +11,7 @@ Item {
     property var pluginService: null
     property string trigger: "agent:"
     property string hosts: ""
+    property string hostRoutes: ""
     property string aliases: ""
     property string terminal: Quickshell.env("TERMINAL") || "ghostty"
     property int maxSessions: 20
@@ -65,6 +66,7 @@ Item {
             return;
         trigger = pluginService.loadPluginData(pluginName, "trigger", "agent:");
         hosts = pluginService.loadPluginData(pluginName, "hosts", "");
+        hostRoutes = pluginService.loadPluginData(pluginName, "host_routes", "");
         aliases = pluginService.loadPluginData(pluginName, "aliases", "");
         terminal = pluginService.loadPluginData(
             pluginName,
@@ -111,6 +113,18 @@ Item {
             .filter(host => host.length > 0);
     }
 
+    function configuredRoutes() {
+        return hostRoutes
+            .split(/[\n,]+/)
+            .map(route => route.trim())
+            .filter(route => route.length > 0);
+    }
+
+    function routeKey(route) {
+        const separator = route.indexOf("=");
+        return (separator >= 0 ? route.slice(0, separator) : route).trim();
+    }
+
     function configuredAliases() {
         return aliases
             .split(/[\s,]+/)
@@ -120,6 +134,15 @@ Item {
 
     function requestedHostKeys() {
         const requested = ["local"];
+        const routes = configuredRoutes();
+        if (routes.length > 0) {
+            for (const route of routes) {
+                const key = routeKey(route);
+                if (key.length > 0 && !requested.includes(key))
+                    requested.push(key);
+            }
+            return requested;
+        }
         for (const host of configuredHosts()) {
             if (!requested.includes(host))
                 requested.push(host);
@@ -139,8 +162,14 @@ Item {
             "--limit", String(maxSessions),
             "--stream"
         ];
-        for (const host of configuredHosts())
-            command.push("--host", host);
+        const routes = configuredRoutes();
+        if (routes.length > 0) {
+            for (const route of routes)
+                command.push("--route", route);
+        } else {
+            for (const host of configuredHosts())
+                command.push("--host", host);
+        }
         for (const alias of configuredAliases())
             command.push("--alias", alias);
         listProcess.command = command;
@@ -529,6 +558,7 @@ Item {
                 _preScored: 2000 - index,
                 _kind: session.kind,
                 _connectHost: session.connectHost,
+                _route: session.route || "",
                 _windowHost: session.windowHost || session.host,
                 _threadId: session.id,
                 _name: session.name,
@@ -548,7 +578,7 @@ Item {
                 "--ssh-connect-timeout", String(sshConnectTimeout),
                 "--ssh-connection-attempts", String(sshConnectionAttempts),
                 "open-claude",
-                "--host", item._connectHost,
+                "--host", item._route || item._connectHost,
                 "--window-host", item._windowHost,
                 "--id", item._threadId,
                 "--name", item._name,
@@ -562,7 +592,7 @@ Item {
             "--ssh-connect-timeout", String(sshConnectTimeout),
             "--ssh-connection-attempts", String(sshConnectionAttempts),
             "open",
-            "--host", item._connectHost,
+            "--host", item._route || item._connectHost,
             "--window-host", item._windowHost,
             "--id", item._threadId,
             "--name", item._name,
