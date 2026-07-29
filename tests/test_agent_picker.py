@@ -29,11 +29,17 @@ class CodexThreadTest(unittest.TestCase):
 
         with (
             mock.patch.object(picker, "_app_server_command", return_value=["codex"]),
-            mock.patch.object(picker, "AppServerClient", return_value=context),
+            mock.patch.object(picker, "AppServerClient", return_value=context) as app_server_client,
         ):
             result = picker.list_codex_threads(picker.HostTarget(None), 20, 1.0)
 
         self.assertEqual([{"id": THREAD_A}], result)
+        app_server_client.assert_called_once_with(
+            ["codex"],
+            1.0,
+            picker.VERSION,
+            picker.PickerError,
+        )
         client.call.assert_called_once_with(
             "thread/list",
             {

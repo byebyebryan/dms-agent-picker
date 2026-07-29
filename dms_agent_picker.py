@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import re
-import selectors
 import shlex
 import shutil
 import socket
@@ -18,6 +17,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
+
+from agent_picker_claude import SESSION_PROBE as CLAUDE_SESSION_PROBE
+from agent_picker_codex import AppServerClient
 
 DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = 4.0
@@ -127,299 +129,6 @@ def parse_host_target(value: str) -> HostTarget:
     return HostTarget(value)
 
 
-CLAUDE_SESSION_PROBE = r"""
-import json
-import os
-import re
-import shutil
-import sys
-from pathlib import Path
-
-uuid_pattern = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
-limit = max(1, int(sys.argv[1]))
-requested_id = sys.argv[2].lower() if len(sys.argv) > 2 and sys.argv[2] else None
-installed = shutil.which("claude") is not None
-config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-projects_dir = config_dir / "projects"
-if not installed:
-    print(json.dumps({"installed": False, "sessions": []}, separators=(",", ":")))
-    raise SystemExit(0)
-
-
-def clean_text(value):
-    if not isinstance(value, str):
-        return ""
-    value = " ".join(value.split())
-    return value[:117] + "..." if len(value) > 120 else value
-
-
-def message_text(message):
-    if not isinstance(message, dict):
-        return ""
-    content = message.get("content")
-    if isinstance(content, str):
-        return clean_text(content)
-    if not isinstance(content, list):
-        return ""
-    parts = []
-    for block in content:
-        if isinstance(block, dict) and block.get("type") == "text":
-            text = block.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-    return clean_text(" ".join(parts))
-
-
-def timestamp_seconds(value):
-    if not isinstance(value, (int, float)):
-        return 0
-    return int(value / 1000 if value > 100000000000 else value)
-
-
-def read_json_lines(path, maximum_bytes=2097152):
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as stream:
-            if size <= maximum_bytes:
-                data = stream.read()
-            else:
-                edge = maximum_bytes // 2
-                head = stream.read(edge)
-                stream.seek(-edge, os.SEEK_END)
-                tail = stream.read(edge)
-                if b"\n" in head:
-                    head = head.rsplit(b"\n", 1)[0]
-                if b"\n" in tail:
-                    tail = tail.split(b"\n", 1)[1]
-                data = head + b"\n" + tail
-    except (OSError, ValueError):
-        return []
-
-    entries = []
-    for raw_line in data.splitlines():
-        try:
-            entry = json.loads(raw_line)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return entries
-
-
-transcripts = []
-if projects_dir.is_dir():
-    for path in projects_dir.glob("*/*.jsonl"):
-        session_id = path.stem.lower()
-        if not uuid_pattern.fullmatch(session_id):
-            continue
-        if requested_id is not None and session_id != requested_id:
-            continue
-        try:
-            modified = int(path.stat().st_mtime)
-        except OSError:
-            continue
-        transcripts.append((modified, session_id, path))
-transcripts.sort(key=lambda item: (item[0], item[1]), reverse=True)
-
-candidate_ids = {item[1] for item in transcripts}
-history = {}
-history_path = config_dir / "history.jsonl"
-if candidate_ids and history_path.is_file():
-    try:
-        stream = history_path.open(encoding="utf-8", errors="replace")
-    except OSError:
-        stream = None
-    if stream is not None:
-        with stream:
-            for line in stream:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                session_id = str(entry.get("sessionId") or "").lower()
-                if session_id not in candidate_ids:
-                    continue
-                item = history.setdefault(session_id, {"name": "", "cwd": "", "recencyAt": 0})
-                if not item["name"]:
-                    item["name"] = clean_text(entry.get("display"))
-                if not item["cwd"] and isinstance(entry.get("project"), str):
-                    item["cwd"] = entry["project"]
-                item["recencyAt"] = max(
-                    item["recencyAt"], timestamp_seconds(entry.get("timestamp"))
-                )
-
-sessions = []
-for modified, session_id, path in transcripts:
-    history_item = history.get(session_id, {})
-    cwd = str(history_item.get("cwd") or "")
-    first_prompt = ""
-    custom_title = ""
-    entrypoint = ""
-    for entry in read_json_lines(path):
-        if not cwd and isinstance(entry.get("cwd"), str):
-            cwd = entry["cwd"]
-        if not entrypoint and isinstance(entry.get("entrypoint"), str):
-            entrypoint = entry["entrypoint"]
-        if entry.get("type") == "custom-title":
-            title = clean_text(entry.get("customTitle"))
-            if title:
-                custom_title = title
-        if (
-            not first_prompt
-            and entry.get("type") == "user"
-            and not entry.get("isMeta")
-        ):
-            first_prompt = message_text(entry.get("message"))
-    if entrypoint == "sdk-cli":
-        continue
-    name = custom_title or str(history_item.get("name") or "") or first_prompt
-    if not name:
-        name = Path(cwd).name if cwd else "Claude " + session_id[:8]
-    sessions.append(
-        {
-            "id": session_id,
-            "name": name,
-            "cwd": cwd,
-            "recencyAt": max(modified, int(history_item.get("recencyAt") or 0)),
-            "updatedAt": modified,
-        }
-    )
-    if len(sessions) >= limit:
-        break
-
-print(json.dumps({"installed": installed, "sessions": sessions}, separators=(",", ":")))
-"""
-
-
-class AppServerClient:
-    """Small JSON-RPC client for one Codex app-server process."""
-
-    def __init__(self, command: Sequence[str], timeout: float) -> None:
-        self.timeout = timeout
-        self._next_id = 1
-        self._buffer = b""
-        self._stderr = bytearray()
-        self.process = subprocess.Popen(
-            list(command),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        if self.process.stdin is None or self.process.stdout is None:
-            raise PickerError("failed to open Codex app-server pipes")
-
-        self._selector = selectors.DefaultSelector()
-        self._selector.register(self.process.stdout, selectors.EVENT_READ, "stdout")
-        if self.process.stderr is not None:
-            self._selector.register(self.process.stderr, selectors.EVENT_READ, "stderr")
-
-    def initialize(self) -> None:
-        self.call(
-            "initialize",
-            {
-                "clientInfo": {
-                    "name": "dms-agent-picker",
-                    "title": "DMS Agent Picker",
-                    "version": VERSION,
-                }
-            },
-        )
-        self.notify("initialized", {})
-
-    def call(self, method: str, params: dict[str, Any]) -> Any:
-        request_id = self._next_id
-        self._next_id += 1
-        self._send({"id": request_id, "method": method, "params": params})
-        return self._read_response(request_id)
-
-    def notify(self, method: str, params: dict[str, Any]) -> None:
-        self._send({"method": method, "params": params})
-
-    def _send(self, message: dict[str, Any]) -> None:
-        if self.process.stdin is None:
-            raise PickerError("Codex app-server stdin is closed")
-        payload = json.dumps(message, separators=(",", ":")).encode() + b"\n"
-        try:
-            self.process.stdin.write(payload)
-            self.process.stdin.flush()
-        except BrokenPipeError as exc:
-            raise PickerError(self._process_error("Codex app-server exited")) from exc
-
-    def _read_response(self, request_id: int) -> Any:
-        deadline = time.monotonic() + self.timeout
-        while True:
-            while b"\n" in self._buffer:
-                line, self._buffer = self._buffer.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if message.get("id") != request_id:
-                    continue
-                if "error" in message:
-                    detail = message["error"]
-                    if isinstance(detail, dict):
-                        detail = detail.get("message", json.dumps(detail))
-                    raise PickerError(f"Codex app-server error: {detail}")
-                return message.get("result")
-
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise PickerError(self._process_error("Codex app-server timed out"))
-
-            events = self._selector.select(remaining)
-            if not events:
-                raise PickerError(self._process_error("Codex app-server timed out"))
-
-            for key, _ in events:
-                stream = key.fileobj
-                file_descriptor = stream if isinstance(stream, int) else stream.fileno()
-                chunk = os.read(file_descriptor, 65536)
-                if not chunk:
-                    try:
-                        self._selector.unregister(stream)
-                    except KeyError:
-                        pass
-                    if key.data == "stdout":
-                        raise PickerError(self._process_error("Codex app-server closed stdout"))
-                    continue
-                if key.data == "stdout":
-                    self._buffer += chunk
-                else:
-                    self._stderr.extend(chunk)
-
-    def _process_error(self, prefix: str) -> str:
-        stderr = self._stderr.decode(errors="replace").strip()
-        return f"{prefix}: {stderr}" if stderr else prefix
-
-    def close(self) -> None:
-        try:
-            if self.process.stdin is not None:
-                self.process.stdin.close()
-            self.process.wait(timeout=0.5)
-        except (BrokenPipeError, subprocess.TimeoutExpired):
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=0.5)
-        finally:
-            self._selector.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        self.close()
-
-
 def _ssh_prefix(policy: SshPolicy) -> list[str]:
     return [
         "ssh",
@@ -513,7 +222,9 @@ def list_codex_threads(
     timeout: float,
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> list[dict[str, Any]]:
-    with AppServerClient(_app_server_command(target, ssh_policy), timeout) as client:
+    with AppServerClient(
+        _app_server_command(target, ssh_policy), timeout, VERSION, PickerError
+    ) as client:
         client.initialize()
         result = client.call(
             "thread/list",
@@ -537,7 +248,9 @@ def read_codex_thread(
     timeout: float,
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> dict[str, Any]:
-    with AppServerClient(_app_server_command(target, ssh_policy), timeout) as client:
+    with AppServerClient(
+        _app_server_command(target, ssh_policy), timeout, VERSION, PickerError
+    ) as client:
         client.initialize()
         result = client.call("thread/read", {"threadId": thread_id, "includeTurns": False})
     thread = result.get("thread") if isinstance(result, dict) else None
