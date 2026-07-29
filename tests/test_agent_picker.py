@@ -152,8 +152,10 @@ class ProjectMetadataTest(unittest.TestCase):
         self.assertEqual("Agent Picker", plugin["name"])
         self.assertEqual("./AgentPicker.qml", plugin["component"])
         self.assertEqual("./AgentPickerSettings.qml", plugin["settings"])
-        self.assertFalse((root / "AgentSessions.qml").exists())
-        self.assertFalse((root / "AgentSessionsSettings.qml").exists())
+        self.assertEqual(
+            {"AgentPicker.qml", "AgentPickerSettings.qml"},
+            {path.name for path in root.glob("Agent*.qml")},
+        )
 
 
 class StreamingSessionTest(unittest.TestCase):
