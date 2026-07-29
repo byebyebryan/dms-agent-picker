@@ -515,33 +515,6 @@ Item {
             refresh();
 
         const items = [];
-        const issue = statusIssue();
-        if (issue) {
-            if (matches({
-                kind: "status",
-                name: issue.name,
-                host: issue.host,
-                connectHost: issue.host,
-                windowHost: issue.host,
-                cwd: "",
-                active: false
-            }, query)) {
-                items.push({
-                    name: issue.name,
-                    icon: issue.icon,
-                    badgeLabel: issue.badgeLabel,
-                    comment: issue.comment,
-                    action: "agent:status:" + issue.host,
-                    categories: ["Agent Picker"],
-                    // DMS launcher plugins expose only selectable result rows.
-                    // Keep the informational row directly after the first
-                    // session so initial keyboard focus remains actionable.
-                    _preScored: 1999,
-                    _kind: "status"
-                });
-            }
-        }
-
         let index = 0;
         for (const session of sessions) {
             if (!matches(session, query))
@@ -569,6 +542,32 @@ Item {
                 _cwd: session.cwd
             });
             index += 1;
+        }
+
+        const issue = statusIssue();
+        if (issue && matches({
+            kind: "status",
+            name: issue.name,
+            host: issue.host,
+            connectHost: issue.host,
+            windowHost: issue.host,
+            cwd: "",
+            active: false
+        }, query)) {
+            // DMS launcher plugins expose only selectable result rows. Keep
+            // the informational row immediately after the first matching
+            // session, so it never receives initial keyboard focus.
+            const score = items.length > 0 ? items[0]._preScored - 0.5 : 4000;
+            items.push({
+                name: issue.name,
+                icon: issue.icon,
+                badgeLabel: issue.badgeLabel,
+                comment: issue.comment,
+                action: "agent:status:" + issue.host,
+                categories: ["Agent Picker"],
+                _preScored: score,
+                _kind: "status"
+            });
         }
         return items;
     }
