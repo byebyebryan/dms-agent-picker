@@ -144,6 +144,17 @@ class ProjectMetadataTest(unittest.TestCase):
         self.assertEqual(picker.VERSION, plugin["version"])
         self.assertEqual(picker.VERSION, project["project"]["version"])
 
+    def test_plugin_uses_the_agent_picker_identity(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        plugin = json.loads((root / "plugin.json").read_text())
+
+        self.assertEqual("agentPicker", plugin["id"])
+        self.assertEqual("Agent Picker", plugin["name"])
+        self.assertEqual("./AgentPicker.qml", plugin["component"])
+        self.assertEqual("./AgentPickerSettings.qml", plugin["settings"])
+        self.assertFalse((root / "AgentSessions.qml").exists())
+        self.assertFalse((root / "AgentSessionsSettings.qml").exists())
+
 
 class StreamingSessionTest(unittest.TestCase):
     def test_stream_emits_completed_hosts_in_completion_order(self) -> None:

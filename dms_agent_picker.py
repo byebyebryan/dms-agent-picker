@@ -24,7 +24,7 @@ DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
 SESSION_ATTACH_TIMEOUT_SECONDS = 60
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -459,6 +459,7 @@ def resolve_host_target(
                 capture_output=True,
                 text=True,
                 timeout=ssh_policy.connect_timeout + 2,
+                check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             failures.append(f"{path}: {exc}")

@@ -63,7 +63,7 @@ deployment.
 ```sh
 ./install.sh
 dms ipc call plugin-scan scan
-dms ipc call plugins enable agentSessions
+dms ipc call plugins enable agentPicker
 ```
 
 Configure the launcher trigger and host routes under DMS plugin settings. The

@@ -6,11 +6,11 @@ import qs.Widgets
 
 PluginSettings {
     id: root
-    pluginId: "agentSessions"
+    pluginId: "agentPicker"
 
     StyledText {
         width: parent.width
-        text: "Agent Sessions"
+        text: "Agent Picker"
         font.pixelSize: Theme.fontSizeLarge
         font.weight: Font.Bold
         color: Theme.surfaceText

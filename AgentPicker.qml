@@ -5,7 +5,7 @@ import Quickshell.Io
 Item {
     id: root
 
-    readonly property string pluginName: "agentSessions"
+    readonly property string pluginName: "agentPicker"
     readonly property string helper: Quickshell.env("HOME") + "/.local/bin/dms-agent-picker"
 
     property var pluginService: null
@@ -486,7 +486,7 @@ Item {
             const problemComment = hostProblemComment(problems);
             return {
                 host: pendingHosts[0],
-                name: "Refreshing agent sessions…",
+                name: "Refreshing Agent Picker…",
                 comment: problemComment.length > 0
                     ? refreshComment + "; " + problemComment
                     : refreshComment,
@@ -531,7 +531,7 @@ Item {
                     badgeLabel: issue.badgeLabel,
                     comment: issue.comment,
                     action: "agent:status:" + issue.host,
-                    categories: ["Agent Sessions"],
+                    categories: ["Agent Picker"],
                     _preScored: 4000,
                     _kind: "status"
                 });
@@ -554,7 +554,7 @@ Item {
                 comment: session.host + " | " + shortenedPath(session.cwd)
                     + " | " + age(session.recencyAt) + " | " + activityLabel(session),
                 action: "agent:" + session.host + ":" + session.kind + ":" + session.id,
-                categories: ["Agent Sessions"],
+                categories: ["Agent Picker"],
                 _preScored: 2000 - index,
                 _kind: session.kind,
                 _connectHost: session.connectHost,
