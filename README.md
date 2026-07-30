@@ -102,16 +102,16 @@ rather than lingering in the picker.
 
 ## CLI
 
-List the 20 most recently prompted sessions:
+List the 40 most recently prompted sessions:
 
 ```sh
-dms-agent-picker list --host laptop.lan --limit 20 | jq
+dms-agent-picker list --host laptop.lan --limit 40 | jq
 ```
 
 Use a logical route with an ordered fallback path:
 
 ```sh
-dms-agent-picker list --route 'snap=snap.wg.lan|snap.lan' --limit 20 | jq
+dms-agent-picker list --route 'snap=snap.wg.lan|snap.lan' --limit 40 | jq
 ```
 
 For integrations that need per-host progress, opt into JSON Lines events. The

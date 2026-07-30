@@ -57,8 +57,8 @@ PluginSettings {
     StringSetting {
         settingKey: "max_sessions"
         label: "Maximum Sessions"
-        placeholder: "20"
-        defaultValue: "20"
+        placeholder: "40"
+        defaultValue: "40"
     }
 
     StringSetting {

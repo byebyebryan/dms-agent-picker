@@ -21,12 +21,12 @@ from typing import Any, Self
 from agent_picker_claude import SESSION_PROBE as CLAUDE_SESSION_PROBE
 from agent_picker_codex import AppServerClient
 
-DEFAULT_LIMIT = 20
+DEFAULT_LIMIT = 40
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
 SESSION_ATTACH_TIMEOUT_SECONDS = 60
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"

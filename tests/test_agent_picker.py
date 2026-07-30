@@ -165,6 +165,11 @@ class ProjectMetadataTest(unittest.TestCase):
 
 
 class StreamingSessionTest(unittest.TestCase):
+    def test_list_parser_defaults_to_40_sessions(self) -> None:
+        args = picker.build_parser().parse_args(["list"])
+
+        self.assertEqual(40, args.limit)
+
     def test_stream_emits_completed_hosts_in_completion_order(self) -> None:
         def sleep_for_local(target: picker.HostTarget) -> None:
             if target.key == "local":

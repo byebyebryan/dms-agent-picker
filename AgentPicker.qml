@@ -15,7 +15,7 @@ Item {
     property string hostRoutes: ""
     property string aliases: ""
     property string terminal: Quickshell.env("TERMINAL") || "ghostty"
-    property int maxSessions: 20
+    property int maxSessions: 40
     property int refreshSeconds: 30
     property int sshConnectTimeout: 2
     property int sshConnectionAttempts: 1
@@ -75,10 +75,10 @@ Item {
             Quickshell.env("TERMINAL") || "ghostty"
         );
         maxSessions = boundedInteger(
-            pluginService.loadPluginData(pluginName, "max_sessions", 20),
+            pluginService.loadPluginData(pluginName, "max_sessions", 40),
             1,
             100,
-            20
+            40
         );
         refreshSeconds = boundedInteger(
             pluginService.loadPluginData(pluginName, "refresh_seconds", 30),
