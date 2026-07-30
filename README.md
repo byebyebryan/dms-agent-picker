@@ -92,11 +92,10 @@ cache TTL defaults to 30 seconds and can be configured from 5 to 300 seconds.
 
 Launcher results use the right-side badge to identify Claude and Codex, while
 the subtitle shows the host, working directory, session age, and activity
-state. A single compact `Refreshing` status row names the hosts whose probes
-are still in flight. DMS launcher plugins currently expose only selectable
-rows, so the informational row is placed directly after the first matching
-session and does nothing when activated; the initial keyboard selection remains
-a real session. If discovery cannot reach a host or only returns partial details, that
+state. A single compact `Refreshing` status row appears at the top of the list
+and names the hosts whose probes are still in flight. DMS launcher plugins
+currently expose only selectable rows, so activating the informational row does
+nothing. If discovery cannot reach a host or only returns partial details, that
 row becomes a warning for 3 seconds after refresh completion, then disappears
 rather than lingering in the picker.
 

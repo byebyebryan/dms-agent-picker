@@ -554,10 +554,9 @@ Item {
             cwd: "",
             active: false
         }, query)) {
-            // DMS launcher plugins expose only selectable result rows. Keep
-            // the informational row immediately after the first matching
-            // session, so it never receives initial keyboard focus.
-            const score = items.length > 0 ? items[0]._preScored - 0.5 : 4000;
+            // Keep transient refresh and availability information visible at
+            // the top of the result list. Activating this row remains a no-op.
+            const score = items.length > 0 ? items[0]._preScored + 0.5 : 4000;
             items.push({
                 name: issue.name,
                 icon: issue.icon,
