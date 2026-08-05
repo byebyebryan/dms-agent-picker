@@ -1,7 +1,7 @@
 [project]
 name = "dms-agent-picker"
-version = "0.6.3"
-description = "DMS launcher for local and SSH Codex and Claude Code sessions"
+version = "0.7.0"
+description = "DMS launcher for local and SSH Codex, Claude Code, and opencode sessions"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Bryan Bai" }]

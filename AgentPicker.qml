@@ -519,7 +519,11 @@ Item {
         for (const session of sessions) {
             if (!matches(session, query))
                 continue;
-            const agentName = session.kind === "claude" ? "Claude" : "Codex";
+            const agentName = session.kind === "claude"
+                ? "Claude"
+                : session.kind === "opencode"
+                    ? "Opencode"
+                    : "Codex";
             items.push({
                 name: session.name,
                 icon: session.active
@@ -581,11 +585,16 @@ Item {
             );
             return;
         }
+        const openSubcommand = item._kind === "claude"
+            ? "open-claude"
+            : item._kind === "opencode"
+                ? "open-opencode"
+                : "open";
         const command = [
             helper,
             "--ssh-connect-timeout", String(sshConnectTimeout),
             "--ssh-connection-attempts", String(sshConnectionAttempts),
-            item._kind === "claude" ? "open-claude" : "open",
+            openSubcommand,
             "--host", item._route || item._connectHost,
             "--window-host", item._windowHost,
             "--id", item._threadId,

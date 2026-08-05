@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,8 @@ THREAD_A = "00000000-0000-0000-0000-000000000001"
 THREAD_B = "00000000-0000-0000-0000-000000000002"
 THREAD_C = "00000000-0000-0000-0000-000000000003"
 THREAD_D = "00000000-0000-0000-0000-000000000004"
+OPENCODE_ID = "ses_0319af718ffegy8N1IoMEggx4B"
+EMPTY_OPCODE = {"installed": False, "sessions": []}
 
 
 class CodexThreadTest(unittest.TestCase):
@@ -78,11 +81,12 @@ class CodexThreadTest(unittest.TestCase):
                 ),
             ),
         ):
-            parents, codex_pids, claude_pids = picker._process_table()
+            parents, codex_pids, claude_pids, opencode_pids = picker._process_table()
 
         self.assertEqual({100: 1, 200: 1, 300: 1}, parents)
         self.assertEqual({200}, codex_pids)
         self.assertEqual({300}, claude_pids)
+        self.assertEqual(set(), opencode_pids)
 
     def test_remote_active_probe_matches_managed_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -104,17 +108,21 @@ class CodexThreadTest(unittest.TestCase):
             write_cmdline(100, ["codex", "app-server", "--listen", "unix://"])
             write_cmdline(200, ["codex"])
             write_cmdline(300, ["claude", "--resume", THREAD_C])
+            write_cmdline(700, ["opencode", "--session", OPENCODE_ID])
             link_fd(200, 3, root / f"rollout-2026-07-21T00-00-00-{THREAD_A}.jsonl")
 
             (bin_dir / "ps").write_text(
-                "#!/bin/sh\nprintf '%s\\n' '100 1 codex' '200 400 codex' '300 500 claude'\n"
+                "#!/bin/sh\n"
+                "printf '%s\\n' '100 1 codex' '200 400 codex' '300 500 claude' '700 800 opencode'\n"
             )
             (bin_dir / "tmux").write_text(
                 "#!/bin/sh\n"
                 f"printf 'codex-picker\\t400\\t{THREAD_A}\\t\\n'\n"
                 f"printf 'claude-picker\\t500\\t\\t{THREAD_C}\\n'\n"
+                f"printf 'opencode-picker\\t800\\t\\t\\t{OPENCODE_ID}\\n'\n"
             )
             (bin_dir / "claude").write_text("#!/bin/sh\nexit 0\n")
+            (bin_dir / "opencode").write_text("#!/bin/sh\nexit 0\n")
             for executable in bin_dir.iterdir():
                 executable.chmod(0o755)
 
@@ -139,6 +147,11 @@ class CodexThreadTest(unittest.TestCase):
             payload["claudeActive"],
         )
         self.assertTrue(payload["claudeInstalled"])
+        self.assertEqual(
+            {OPENCODE_ID: {"pid": 700, "tmuxSession": "opencode-picker"}},
+            payload["opencodeActive"],
+        )
+        self.assertTrue(payload["opencodeInstalled"])
 
 
 class ProjectMetadataTest(unittest.TestCase):
@@ -206,11 +219,16 @@ class StreamingSessionTest(unittest.TestCase):
             _policy: picker.SshPolicy,
         ) -> dict[str, object]:
             sleep_for_local(target)
-            return {"host": target.key, "active": {}, "claudeActive": {}}
+            return {"host": target.key, "active": {}, "claudeActive": {}, "opencodeActive": {}}
 
         with (
             mock.patch.object(picker, "list_codex_threads", side_effect=threads),
             mock.patch.object(picker, "list_claude_sessions", side_effect=claude),
+            mock.patch.object(
+                picker,
+                "list_opencode_sessions",
+                return_value={"installed": False, "sessions": []},
+            ),
             mock.patch.object(picker, "get_active_snapshot", side_effect=active),
         ):
             events = list(picker.stream_session_events(["fast.lan"], limit=20, timeout=1.0))
@@ -246,8 +264,18 @@ class StreamingSessionTest(unittest.TestCase):
             ),
             mock.patch.object(
                 picker,
+                "list_opencode_sessions",
+                return_value={"installed": False, "sessions": []},
+            ),
+            mock.patch.object(
+                picker,
                 "get_active_snapshot",
-                return_value={"host": "desktop", "active": {}, "claudeActive": {}},
+                return_value={
+                    "host": "desktop",
+                    "active": {},
+                    "claudeActive": {},
+                    "opencodeActive": {},
+                },
             ),
         ):
             events = list(
@@ -319,18 +347,21 @@ class MergeHostResultsTest(unittest.TestCase):
                     picker.HostTarget(None),
                     local_threads,
                     {"installed": False, "sessions": []},
+                    EMPTY_OPCODE,
                     {"host": "desktop", "active": {}},
                 ),
                 (
                     picker.HostTarget("laptop.lan"),
                     laptop_threads,
                     {"installed": False, "sessions": []},
+                    EMPTY_OPCODE,
                     laptop_active,
                 ),
                 (
                     picker.HostTarget("laptop-alias"),
                     laptop_threads,
                     {"installed": False, "sessions": []},
+                    EMPTY_OPCODE,
                     laptop_active,
                 ),
             ],
@@ -358,6 +389,7 @@ class MergeHostResultsTest(unittest.TestCase):
                         }
                     ],
                     {"installed": False, "sessions": []},
+                    EMPTY_OPCODE,
                     picker.PickerError("probe failed"),
                 )
             ],
@@ -386,10 +418,12 @@ class MergeHostResultsTest(unittest.TestCase):
                             }
                         ],
                     },
+                    EMPTY_OPCODE,
                     {
                         "host": "80H1VV3",
                         "active": {},
                         "claudeActive": {THREAD_C: {"pid": 42, "tmuxSession": "improve-auth-flow"}},
+                        "opencodeActive": {},
                     },
                 )
             ],
@@ -423,10 +457,12 @@ class MergeHostResultsTest(unittest.TestCase):
                     picker.HostTarget(None),
                     [],
                     {"installed": False, "sessions": [{"id": THREAD_C}]},
+                    EMPTY_OPCODE,
                     {
                         "host": "desktop",
                         "active": {},
                         "claudeActive": {},
+                        "opencodeActive": {},
                     },
                 )
             ],
@@ -459,7 +495,8 @@ class MergeHostResultsTest(unittest.TestCase):
                             }
                         ],
                     },
-                    {"host": "desktop", "active": {}, "claudeActive": {}},
+                    EMPTY_OPCODE,
+                    {"host": "desktop", "active": {}, "claudeActive": {}, "opencodeActive": {}},
                 )
             ],
             limit=20,
@@ -714,12 +751,18 @@ class TmuxNameTest(unittest.TestCase):
         claude_script = picker._ensure_claude_session_script(
             THREAD_C, "project", "/home/test/code/project"
         )
+        opencode_script = picker._ensure_opencode_session_script(
+            OPENCODE_ID, "project", "/home/test/code/project"
+        )
         self.assertIn("codex_command=\"exec sh -c '$wait_script'", codex_script)
         self.assertIn("claude_command=\"exec sh -c '$wait_script'", claude_script)
+        self.assertIn("opencode_command=\"exec sh -c '$wait_script'", opencode_script)
         self.assertIn("@agent_picker_waiting 1", codex_script)
         self.assertIn("@agent_picker_waiting 1", claude_script)
+        self.assertIn("@agent_picker_waiting 1", opencode_script)
         self.assertIn("existing=$(tmux list-panes", codex_script)
         self.assertIn("existing=$(tmux list-panes", claude_script)
+        self.assertIn("existing=$(tmux list-panes", opencode_script)
 
     def test_remote_attach_quotes_exact_target_for_zsh(self) -> None:
         self.assertEqual(
@@ -906,7 +949,8 @@ class HostConfigTest(unittest.TestCase):
                     route,
                     [{"id": THREAD_A, "name": "dotfiles", "cwd": "/home/test"}],
                     {"installed": False, "sessions": []},
-                    {"host": "80H1VV3", "active": {}},
+                    EMPTY_OPCODE,
+                    {"host": "80H1VV3", "active": {}, "opencodeActive": {}},
                 )
             ],
             limit=20,
@@ -926,7 +970,8 @@ class HostConfigTest(unittest.TestCase):
                     picker.HostTarget("snap.lan"),
                     [{"id": THREAD_A, "name": "dotfiles", "cwd": "/home/test"}],
                     {"installed": False, "sessions": []},
-                    {"host": "80H1VV3", "active": {}},
+                    EMPTY_OPCODE,
+                    {"host": "80H1VV3", "active": {}, "opencodeActive": {}},
                 )
             ],
             limit=20,
@@ -947,8 +992,17 @@ class HostConfigTest(unittest.TestCase):
             ),
             mock.patch.object(
                 picker,
+                "list_opencode_sessions",
+                return_value={"installed": False, "sessions": []},
+            ),
+            mock.patch.object(
+                picker,
                 "get_active_snapshot",
-                return_value={"host": "unused", "active": {}},
+                return_value={
+                    "host": "unused",
+                    "active": {},
+                    "opencodeActive": {},
+                },
             ) as active,
         ):
             picker.aggregate_sessions(
@@ -971,6 +1025,217 @@ class HostConfigTest(unittest.TestCase):
             )
 
         self.assertEqual(["local", "starship"], [target.key for target in targets])
+
+
+class OpencodeSessionTest(unittest.TestCase):
+    def _database(self, root: Path, sessions: list[tuple[object, ...]]) -> Path:
+        db_dir = root / "data" / "opencode"
+        db_dir.mkdir(parents=True)
+        database = db_dir / "opencode.db"
+        conn = sqlite3.connect(database)
+        conn.execute(
+            "CREATE TABLE session ("
+            "id text PRIMARY KEY, title text NOT NULL, directory text NOT NULL, "
+            "time_updated integer NOT NULL, time_archived integer"
+            ")"
+        )
+        conn.executemany(
+            "INSERT INTO session (id, title, directory, time_updated, time_archived) "
+            "VALUES (?, ?, ?, ?, ?)",
+            sessions,
+        )
+        conn.commit()
+        conn.close()
+        return database
+
+    def _environment(self, root: Path, with_opencode: bool = True) -> dict[str, str]:
+        environment = dict(os.environ)
+        environment["XDG_DATA_HOME"] = str(root / "data")
+        bin_dir = root / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        if with_opencode:
+            executable = bin_dir / "opencode"
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+        environment["PATH"] = str(bin_dir)
+        return environment
+
+    def test_discovers_sessions_from_sqlite_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._database(
+                root,
+                [
+                    (OPENCODE_ID, "Improve auth flow", "/home/test/code/app", 2_000_000_000_000, None),
+                    ("ses_archived", "Old work", "/home/test", 3_000_000_000_000, 3_000_000_000_001),
+                ],
+            )
+            with mock.patch.dict(os.environ, self._environment(root)):
+                result = picker.list_opencode_sessions(picker.HostTarget(None), 20, 2.0)
+
+        self.assertTrue(result["installed"])
+        self.assertEqual(1, len(result["sessions"]))
+        self.assertEqual(
+            {
+                "id": OPENCODE_ID,
+                "name": "Improve auth flow",
+                "cwd": "/home/test/code/app",
+                "recencyAt": 2_000_000_000,
+                "updatedAt": 2_000_000_000,
+            },
+            result["sessions"][0],
+        )
+
+    def test_reads_one_session_by_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None)])
+            with mock.patch.dict(os.environ, self._environment(root)):
+                session = picker.read_opencode_session(picker.HostTarget(None), OPENCODE_ID, 2.0)
+
+        self.assertEqual(OPENCODE_ID, session["id"])
+        self.assertEqual("Title", session["name"])
+
+    def test_probe_reports_not_installed_without_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None)])
+            with mock.patch.dict(os.environ, self._environment(root, with_opencode=False)):
+                result = picker.list_opencode_sessions(picker.HostTarget(None), 20, 2.0)
+
+        self.assertFalse(result["installed"])
+        self.assertEqual(1, len(result["sessions"]))
+
+    def test_extracts_session_id_from_arguments(self) -> None:
+        self.assertEqual(
+            OPENCODE_ID,
+            picker._opencode_session_id_from_args(["opencode", "--session", OPENCODE_ID]),
+        )
+        self.assertEqual(
+            OPENCODE_ID,
+            picker._opencode_session_id_from_args(["opencode", "-s", OPENCODE_ID]),
+        )
+        self.assertEqual(
+            OPENCODE_ID,
+            picker._opencode_session_id_from_args(["opencode", f"--session={OPENCODE_ID}"]),
+        )
+        self.assertIsNone(picker._opencode_session_id_from_args(["opencode"]))
+
+    def test_active_snapshot_maps_managed_tmux_session_id(self) -> None:
+        with mock.patch.object(picker, "_opencode_session_id_for_process", return_value=None):
+            active = picker._opencode_active_sessions(
+                parents={700: 800, 800: 1},
+                opencode_pids={700},
+                pane_sessions={800: "improve-auth-flow"},
+                option_sessions={OPENCODE_ID: "improve-auth-flow"},
+            )
+
+        self.assertEqual({OPENCODE_ID: {"pid": 700, "tmuxSession": "improve-auth-flow"}}, active)
+
+    def test_merge_includes_active_opencode_sessions(self) -> None:
+        result = picker.merge_host_results(
+            [
+                (
+                    picker.HostTarget("laptop.lan"),
+                    [],
+                    {"installed": False, "sessions": []},
+                    {
+                        "installed": True,
+                        "sessions": [
+                            {
+                                "id": OPENCODE_ID,
+                                "name": "Fix auth flow",
+                                "cwd": "/home/test/code/app",
+                                "recencyAt": 90,
+                                "updatedAt": 90,
+                            }
+                        ],
+                    },
+                    {
+                        "host": "laptop",
+                        "active": {},
+                        "claudeActive": {},
+                        "opencodeActive": {OPENCODE_ID: {"pid": 42, "tmuxSession": "auth-flow"}},
+                    },
+                )
+            ],
+            limit=20,
+        )
+
+        session = result["sessions"][0]
+        self.assertEqual("opencode", session["kind"])
+        self.assertEqual(OPENCODE_ID, session["id"])
+        self.assertTrue(session["active"])
+        self.assertEqual("auth-flow", session["tmuxSession"])
+        self.assertEqual("laptop.lan", session["connectHost"])
+
+    def test_open_parser_accepts_opencode_session_ids(self) -> None:
+        args = picker.build_parser().parse_args(
+            ["open-opencode", "--id", OPENCODE_ID, "--detach"]
+        )
+
+        self.assertEqual("open-opencode", args.command)
+        self.assertEqual(OPENCODE_ID, args.id)
+        self.assertTrue(args.detach)
+
+    def test_open_parser_rejects_uuid_for_opencode(self) -> None:
+        with self.assertRaises(SystemExit):
+            picker.build_parser().parse_args(["open-opencode", "--id", THREAD_A])
+
+    def test_open_reuses_existing_opencode_tmux_session(self) -> None:
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "laptop",
+                    "active": {},
+                    "claudeActive": {},
+                    "opencodeInstalled": True,
+                    "opencodeActive": {OPENCODE_ID: {"pid": 42, "tmuxSession": "auth-flow"}},
+                },
+            ),
+            mock.patch.object(picker, "ensure_opencode_tmux_session") as ensure,
+        ):
+            session = picker.resolve_opencode_open_target(
+                picker.HostTarget("laptop.lan"),
+                OPENCODE_ID,
+                "Fix auth flow",
+                "/home/test/code/app",
+                1.0,
+            )
+
+        self.assertEqual("auth-flow", session)
+        ensure.assert_not_called()
+
+    def test_active_opencode_outside_tmux_is_not_duplicated(self) -> None:
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "desktop",
+                    "active": {},
+                    "claudeActive": {},
+                    "opencodeInstalled": True,
+                    "opencodeActive": {OPENCODE_ID: {"pid": 42, "tmuxSession": None}},
+                },
+            ),
+            self.assertRaisesRegex(picker.PickerError, "outside tmux"),
+        ):
+            picker.resolve_opencode_open_target(
+                picker.HostTarget(None), OPENCODE_ID, "Fix auth flow", "/tmp", 1.0
+            )
+
+    def test_managed_session_resumes_exact_id_in_recorded_directory(self) -> None:
+        script = picker._ensure_opencode_session_script(
+            OPENCODE_ID, "Fix auth flow", "/home/test/code/app"
+        )
+
+        self.assertIn("requested_cwd=/home/test/code/app", script)
+        self.assertIn('"$opencode_bin" --session "$session_id"', script)
+        self.assertIn("@opencode_session_id", script)
+        self.assertIn("@agent_picker_waiting 1", script)
 
 
 if __name__ == "__main__":

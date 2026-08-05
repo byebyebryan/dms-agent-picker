@@ -1,4 +1,4 @@
-"""Aggregate and open Codex and Claude Code sessions from local and SSH hosts."""
+"""Aggregate and open Codex, Claude Code, and opencode sessions from local and SSH hosts."""
 
 from __future__ import annotations
 
@@ -20,17 +20,19 @@ from typing import Any, Self
 
 from agent_picker_claude import SESSION_PROBE as CLAUDE_SESSION_PROBE
 from agent_picker_codex import AppServerClient
+from agent_picker_opencode import SESSION_PROBE as OPENCODE_SESSION_PROBE
 
 DEFAULT_LIMIT = 40
 DEFAULT_TIMEOUT = 4.0
 DEFAULT_SSH_CONNECT_TIMEOUT = 2
 DEFAULT_SSH_CONNECTION_ATTEMPTS = 1
 SESSION_ATTACH_TIMEOUT_SECONDS = 60
-VERSION = "0.6.3"
+VERSION = "0.7.0"
 UUID_PATTERN = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
+OPENCODE_ID_PATTERN = re.compile(r"ses_[A-Za-z0-9]+")
 
 
 class PickerError(RuntimeError):
@@ -68,6 +70,7 @@ DEFAULT_SSH_POLICY = SshPolicy()
 HostResult = tuple[
     HostTarget,
     list[dict[str, Any]] | Exception,
+    dict[str, Any] | Exception,
     dict[str, Any] | Exception,
     dict[str, Any] | Exception,
 ]
@@ -259,11 +262,13 @@ def read_codex_thread(
     return thread
 
 
-def query_claude_sessions(
+def _query_session_probe(
     target: HostTarget,
     limit: int,
     timeout: float,
-    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+    ssh_policy: SshPolicy,
+    probe: str,
+    provider: str,
     session_id: str | None = None,
 ) -> dict[str, Any]:
     arguments = [str(limit), session_id or ""]
@@ -275,24 +280,60 @@ def query_claude_sessions(
     try:
         result = subprocess.run(
             command,
-            input=CLAUDE_SESSION_PROBE,
+            input=probe,
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise PickerError(f"Claude session query timed out on {target.key}") from exc
+        raise PickerError(f"{provider} session query timed out on {target.key}") from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or f"exit {result.returncode}"
-        raise PickerError(f"Claude session query failed on {target.key}: {detail}")
+        raise PickerError(f"{provider} session query failed on {target.key}: {detail}")
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise PickerError(f"Claude session query returned invalid JSON on {target.key}") from exc
+        raise PickerError(f"{provider} session query returned invalid JSON on {target.key}") from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
-        raise PickerError(f"Claude session query returned invalid data on {target.key}")
+        raise PickerError(f"{provider} session query returned invalid data on {target.key}")
     return payload
+
+
+def query_claude_sessions(
+    target: HostTarget,
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    return _query_session_probe(
+        target,
+        limit,
+        timeout,
+        ssh_policy,
+        CLAUDE_SESSION_PROBE,
+        "Claude",
+        session_id,
+    )
+
+
+def query_opencode_sessions(
+    target: HostTarget,
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    return _query_session_probe(
+        target,
+        limit,
+        timeout,
+        ssh_policy,
+        OPENCODE_SESSION_PROBE,
+        "opencode",
+        session_id,
+    )
 
 
 def list_claude_sessions(
@@ -302,6 +343,15 @@ def list_claude_sessions(
     ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
 ) -> dict[str, Any]:
     return query_claude_sessions(target, limit, timeout, ssh_policy)
+
+
+def list_opencode_sessions(
+    target: HostTarget,
+    limit: int,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
+    return query_opencode_sessions(target, limit, timeout, ssh_policy)
 
 
 def read_claude_session(
@@ -316,6 +366,21 @@ def read_claude_session(
     sessions = result["sessions"]
     if not sessions or not isinstance(sessions[0], dict):
         raise PickerError(f"Claude session {session_id} was not found on {target.key}")
+    return sessions[0]
+
+
+def read_opencode_session(
+    target: HostTarget,
+    session_id: str,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> dict[str, Any]:
+    result = query_opencode_sessions(target, 1, timeout, ssh_policy, session_id)
+    if not result.get("installed"):
+        raise PickerError(f"opencode is not installed on {target.key}")
+    sessions = result["sessions"]
+    if not sessions or not isinstance(sessions[0], dict):
+        raise PickerError(f"opencode session {session_id} was not found on {target.key}")
     return sessions[0]
 
 
@@ -344,7 +409,7 @@ def _is_shared_codex_app_server(arguments: Sequence[str]) -> bool:
     return False
 
 
-def _process_table() -> tuple[dict[int, int], set[int], set[int]]:
+def _process_table() -> tuple[dict[int, int], set[int], set[int], set[int]]:
     result = subprocess.run(
         ["ps", "-u", str(os.getuid()), "-o", "pid=,ppid=,comm="],
         check=True,
@@ -354,6 +419,7 @@ def _process_table() -> tuple[dict[int, int], set[int], set[int]]:
     parents: dict[int, int] = {}
     codex_pids: set[int] = set()
     claude_pids: set[int] = set()
+    opencode_pids: set[int] = set()
     for line in result.stdout.splitlines():
         parts = line.split(None, 2)
         if len(parts) != 3:
@@ -367,7 +433,9 @@ def _process_table() -> tuple[dict[int, int], set[int], set[int]]:
             codex_pids.add(pid)
         if "claude" in command:
             claude_pids.add(pid)
-    return parents, codex_pids, claude_pids
+        if "opencode" in command:
+            opencode_pids.add(pid)
+    return parents, codex_pids, claude_pids, opencode_pids
 
 
 def _thread_id_for_process(pid: int) -> str | None:
@@ -389,27 +457,28 @@ def _thread_id_for_process(pid: int) -> str | None:
     return None
 
 
-def _tmux_panes() -> tuple[dict[int, str], dict[str, str], dict[str, str]]:
+def _tmux_panes() -> tuple[dict[int, str], dict[str, str], dict[str, str], dict[str, str]]:
     result = subprocess.run(
         [
             "tmux",
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}\t#{@claude_session_id}",
+            "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}\t#{@claude_session_id}\t#{@opencode_session_id}",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
-        return {}, {}, {}
+        return {}, {}, {}, {}
 
     pane_sessions: dict[int, str] = {}
     codex_option_sessions: dict[str, str] = {}
     claude_option_sessions: dict[str, str] = {}
+    opencode_option_sessions: dict[str, str] = {}
     for line in result.stdout.splitlines():
-        parts = line.split("\t", 3)
+        parts = line.split("\t", 4)
         if len(parts) < 2:
             continue
         try:
@@ -418,9 +487,11 @@ def _tmux_panes() -> tuple[dict[int, str], dict[str, str], dict[str, str]]:
             continue
         if len(parts) >= 3 and UUID_PATTERN.fullmatch(parts[2]):
             codex_option_sessions[parts[2].lower()] = parts[0]
-        if len(parts) == 4 and UUID_PATTERN.fullmatch(parts[3]):
+        if len(parts) >= 4 and UUID_PATTERN.fullmatch(parts[3]):
             claude_option_sessions[parts[3].lower()] = parts[0]
-    return pane_sessions, codex_option_sessions, claude_option_sessions
+        if len(parts) == 5 and OPENCODE_ID_PATTERN.fullmatch(parts[4]):
+            opencode_option_sessions[parts[4]] = parts[0]
+    return pane_sessions, codex_option_sessions, claude_option_sessions, opencode_option_sessions
 
 
 def _tmux_session_for_process(
@@ -480,6 +551,50 @@ def _claude_session_id_for_process(pid: int) -> str | None:
     return None
 
 
+def _opencode_session_id_from_args(arguments: Sequence[str]) -> str | None:
+    value_flags = {"--session", "-s"}
+    for index, argument in enumerate(arguments):
+        if argument in value_flags and index + 1 < len(arguments):
+            candidate = arguments[index + 1]
+            if OPENCODE_ID_PATTERN.fullmatch(candidate):
+                return candidate
+        if argument.startswith("--session="):
+            candidate = argument.partition("=")[2]
+            if OPENCODE_ID_PATTERN.fullmatch(candidate):
+                return candidate
+    return None
+
+
+def _opencode_session_id_for_process(pid: int) -> str | None:
+    try:
+        arguments = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
+    except (FileNotFoundError, PermissionError, OSError):
+        arguments = []
+    return _opencode_session_id_from_args(arguments)
+
+
+def _opencode_active_sessions(
+    parents: Mapping[int, int],
+    opencode_pids: set[int],
+    pane_sessions: Mapping[int, str],
+    option_sessions: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    option_ids = {tmux_session: session_id for session_id, tmux_session in option_sessions.items()}
+    active: dict[str, dict[str, Any]] = {}
+    for pid in opencode_pids:
+        tmux_session = _tmux_session_for_process(pid, parents, pane_sessions)
+        session_id = option_ids.get(tmux_session or "")
+        if session_id is None:
+            session_id = _opencode_session_id_for_process(pid)
+        if session_id is None:
+            continue
+        item = {"pid": pid, "tmuxSession": tmux_session}
+        previous = active.get(session_id)
+        if previous is None or (previous.get("tmuxSession") is None and tmux_session):
+            active[session_id] = item
+    return active
+
+
 def _claude_active_sessions(
     parents: Mapping[int, int],
     claude_pids: set[int],
@@ -503,8 +618,8 @@ def _claude_active_sessions(
 
 
 def active_snapshot() -> dict[str, Any]:
-    parents, codex_pids, claude_pids = _process_table()
-    pane_sessions, option_sessions, claude_option_sessions = _tmux_panes()
+    parents, codex_pids, claude_pids, opencode_pids = _process_table()
+    pane_sessions, option_sessions, claude_option_sessions, opencode_option_sessions = _tmux_panes()
     active: dict[str, dict[str, Any]] = {}
 
     for pid in codex_pids:
@@ -530,6 +645,13 @@ def active_snapshot() -> dict[str, Any]:
             claude_pids,
             pane_sessions,
             claude_option_sessions,
+        ),
+        "opencodeInstalled": shutil.which("opencode") is not None,
+        "opencodeActive": _opencode_active_sessions(
+            parents,
+            opencode_pids,
+            pane_sessions,
+            opencode_option_sessions,
         ),
     }
 
@@ -571,6 +693,7 @@ ps = subprocess.run(
 parents = {}
 codex_pids = set()
 claude_pids = set()
+opencode_pids = set()
 for line in ps.stdout.splitlines():
     parts = line.split(None, 2)
     if len(parts) != 3:
@@ -588,6 +711,8 @@ for line in ps.stdout.splitlines():
         codex_pids.add(pid)
     if "claude" in command:
         claude_pids.add(pid)
+    if "opencode" in command:
+        opencode_pids.add(pid)
 
 panes = subprocess.run(
     [
@@ -595,7 +720,7 @@ panes = subprocess.run(
         "list-panes",
         "-a",
         "-F",
-        "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}\t#{@claude_session_id}",
+        "#{session_name}\t#{pane_pid}\t#{@codex_thread_id}\t#{@claude_session_id}\t#{@opencode_session_id}",
     ],
     capture_output=True,
     text=True,
@@ -603,9 +728,10 @@ panes = subprocess.run(
 pane_sessions = {}
 option_sessions = {}
 claude_option_sessions = {}
+opencode_option_sessions = {}
 if panes.returncode == 0:
     for line in panes.stdout.splitlines():
-        parts = line.split("\t", 3)
+        parts = line.split("\t", 4)
         if len(parts) < 2:
             continue
         try:
@@ -614,8 +740,10 @@ if panes.returncode == 0:
             continue
         if len(parts) >= 3 and uuid_pattern.fullmatch(parts[2]):
             option_sessions[parts[2].lower()] = parts[0]
-        if len(parts) == 4 and uuid_pattern.fullmatch(parts[3]):
+        if len(parts) >= 4 and uuid_pattern.fullmatch(parts[3]):
             claude_option_sessions[parts[3].lower()] = parts[0]
+        if len(parts) == 5 and parts[4].startswith("ses_"):
+            opencode_option_sessions[parts[4]] = parts[0]
 
 active = {}
 def tmux_session_for_process(pid):
@@ -711,12 +839,49 @@ for pid in claude_pids:
     if previous is None or (previous.get("tmuxSession") is None and tmux_session):
         claude_active[session_id] = item
 
+def opencode_session_id_from_args(arguments):
+    for index, argument in enumerate(arguments):
+        if argument in {"--session", "-s"} and index + 1 < len(arguments):
+            candidate = arguments[index + 1]
+            if candidate.startswith("ses_"):
+                return candidate
+        if argument.startswith("--session="):
+            candidate = argument.partition("=")[2]
+            if candidate.startswith("ses_"):
+                return candidate
+    return None
+
+def opencode_session_id_for_process(pid):
+    try:
+        arguments = (proc_root / str(pid) / "cmdline").read_bytes().decode(errors="replace").split("\0")
+    except (FileNotFoundError, PermissionError, OSError):
+        arguments = []
+    return opencode_session_id_from_args(arguments)
+
+opencode_active = {}
+opencode_option_ids = {
+    tmux_session: session_id for session_id, tmux_session in opencode_option_sessions.items()
+}
+for pid in opencode_pids:
+    tmux_session = tmux_session_for_process(pid)
+    session_id = opencode_option_ids.get(tmux_session or "")
+    if session_id is None:
+        session_id = opencode_session_id_for_process(pid)
+    if session_id is None:
+        continue
+    item = {"pid": pid, "tmuxSession": tmux_session}
+    previous = opencode_active.get(session_id)
+    if previous is None or (previous.get("tmuxSession") is None and tmux_session):
+        opencode_active[session_id] = item
+
 print(json.dumps(
     {
         "host": socket.gethostname(),
         "active": active,
         "claudeInstalled": shutil.which("claude") is not None,
         "claudeActive": claude_active,
+        "opencodeInstalled": shutil.which("opencode") is not None,
+        "opencodeActive": opencode_active,
     },
     separators=(",", ":"),
 ))
@@ -750,6 +915,7 @@ def remote_active_snapshot(
         not isinstance(payload, dict)
         or not isinstance(payload.get("active"), dict)
         or not isinstance(payload.get("claudeActive"), dict)
+        or not isinstance(payload.get("opencodeActive"), dict)
     ):
         raise PickerError(f"active-session probe returned invalid data on {host}")
     return payload
@@ -774,17 +940,19 @@ def merge_host_results(
     sessions: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
-    for target, threads_result, claude_result, active_result in host_results:
+    for target, threads_result, claude_result, opencode_result, active_result in host_results:
         if isinstance(active_result, Exception):
             errors.append({"host": target.key, "stage": "active", "message": str(active_result)})
             canonical_host = target.key
             active_map: dict[str, Any] = {}
             claude_active_map: dict[str, Any] = {}
+            opencode_active_map: dict[str, Any] = {}
             activity_known = False
         else:
             canonical_host = str(active_result.get("host") or target.key)
             active_map = active_result.get("active", {})
             claude_active_map = active_result.get("claudeActive", {})
+            opencode_active_map = active_result.get("opencodeActive", {})
             activity_known = True
         display_host = target.route_key or aliases.get(
             _short_hostname(canonical_host), canonical_host
@@ -842,6 +1010,44 @@ def merge_host_results(
                     "kind": "claude",
                     "id": session_id,
                     "name": name or Path(cwd).name or session_id[:8],
+                    "cwd": cwd,
+                    "host": display_host,
+                    "windowHost": canonical_host,
+                    "connectHost": target.connect_host or "local",
+                    "recencyAt": int(conversation.get("recencyAt") or 0),
+                    "updatedAt": int(conversation.get("updatedAt") or 0),
+                    "active": active_info is not None,
+                    "activityState": (
+                        "active"
+                        if active_info is not None
+                        else "idle"
+                        if activity_known
+                        else "unknown"
+                    ),
+                    "tmuxSession": (
+                        active_info.get("tmuxSession") if isinstance(active_info, dict) else None
+                    ),
+                }
+                if target.route_spec:
+                    session["route"] = target.route_spec
+                sessions.append(session)
+
+        if isinstance(opencode_result, Exception):
+            errors.append({"host": target.key, "stage": "opencode", "message": str(opencode_result)})
+        elif opencode_result.get("installed"):
+            for conversation in opencode_result.get("sessions", []):
+                if not isinstance(conversation, dict):
+                    continue
+                session_id = str(conversation.get("id") or "")
+                if not OPENCODE_ID_PATTERN.fullmatch(session_id):
+                    continue
+                active_info = opencode_active_map.get(session_id)
+                name = str(conversation.get("name") or "").strip()
+                cwd = str(conversation.get("cwd") or "").strip()
+                session = {
+                    "kind": "opencode",
+                    "id": session_id,
+                    "name": name or Path(cwd).name or session_id,
                     "cwd": cwd,
                     "host": display_host,
                     "windowHost": canonical_host,
@@ -943,16 +1149,18 @@ def _collect_host_result(
     try:
         resolved_target = resolve_host_target(target, ssh_policy)
     except (PickerError, OSError, subprocess.SubprocessError) as exc:
-        return target, exc, exc, exc
+        return target, exc, exc, exc, exc
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         threads = pool.submit(list_codex_threads, resolved_target, limit, timeout, ssh_policy)
         claude = pool.submit(list_claude_sessions, resolved_target, limit, timeout, ssh_policy)
+        opencode = pool.submit(list_opencode_sessions, resolved_target, limit, timeout, ssh_policy)
         active = pool.submit(get_active_snapshot, resolved_target, timeout, ssh_policy)
         return (
             resolved_target,
             _future_result(threads),
             _future_result(claude),
+            _future_result(opencode),
             _future_result(active),
         )
 
@@ -1233,6 +1441,110 @@ def resolve_claude_open_target(
     )
 
 
+def _ensure_opencode_session_script(session_id: str, name: str, cwd: str) -> str:
+    base = _safe_tmux_name(name, session_id)
+    short_id = session_id[:8]
+    wait_script = _tmux_client_wait_script()
+    return f"""set -eu
+session_id={shlex.quote(session_id)}
+display_name={shlex.quote(name)}
+requested_cwd={shlex.quote(cwd)}
+base={shlex.quote(base)}
+short_id={shlex.quote(short_id)}
+wait_script={shlex.quote(wait_script)}
+opencode_bin=$(command -v opencode || true)
+if [ -z "$opencode_bin" ]; then
+    printf '%s\n' 'opencode is not installed' >&2
+    exit 1
+fi
+if [ -z "$requested_cwd" ] || [ ! -d "$requested_cwd" ]; then
+    requested_cwd=$HOME
+fi
+existing=$(tmux list-panes -a -F '#{{session_name}}\t#{{@opencode_session_id}}\t#{{@agent_picker_waiting}}' 2>/dev/null | awk -F '\t' -v id="$session_id" '$2 == id && $3 == "1" {{ print $1; exit }}')
+if [ -n "$existing" ]; then
+    printf '%s\n' "$existing"
+    exit 0
+fi
+candidate=$base
+counter=0
+while tmux has-session -t "=$candidate" 2>/dev/null; do
+    counter=$((counter + 1))
+    if [ "$counter" -eq 1 ]; then
+        candidate="${{base}}-${{short_id}}"
+    else
+        candidate="${{base}}-${{short_id}}-$counter"
+    fi
+done
+tmux new-session -d -s "$candidate" -c "$requested_cwd"
+tmux set-option -t "$candidate" @opencode_session_id "$session_id"
+tmux set-option -t "$candidate" @opencode_name "$display_name"
+tmux set-option -t "$candidate" @agent_picker_waiting 1
+opencode_command="exec sh -c '$wait_script' sh \"$candidate\" \"$opencode_bin\" --session \"$session_id\""
+tmux respawn-pane -k -t "$candidate:0.0" -c "$requested_cwd" "$opencode_command"
+printf '%s\n' "$candidate"
+"""
+
+
+def ensure_opencode_tmux_session(
+    target: HostTarget,
+    session_id: str,
+    name: str,
+    cwd: str,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> str:
+    script = _ensure_opencode_session_script(session_id, name, cwd)
+    command = _tmux_creation_command(target, script, ssh_policy)
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PickerError(f"timed out creating opencode session on {target.key}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit {result.returncode}"
+        raise PickerError(f"failed to create opencode session on {target.key}: {detail}")
+    session = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    if not session:
+        raise PickerError(f"tmux did not return an opencode session on {target.key}")
+    return session
+
+
+def resolve_opencode_open_target(
+    target: HostTarget,
+    session_id: str,
+    name: str | None,
+    cwd: str | None,
+    timeout: float,
+    ssh_policy: SshPolicy = DEFAULT_SSH_POLICY,
+) -> str:
+    snapshot = get_active_snapshot(target, timeout, ssh_policy)
+    if not snapshot.get("opencodeInstalled"):
+        raise PickerError(f"opencode is not installed on {target.key}")
+
+    active_info = snapshot.get("opencodeActive", {}).get(session_id)
+    if isinstance(active_info, dict):
+        tmux_session = active_info.get("tmuxSession")
+        if tmux_session:
+            return str(tmux_session)
+        raise PickerError(
+            f"opencode session {session_id[:8]} is active on {target.key} outside tmux"
+        )
+
+    if not name or cwd is None:
+        conversation = read_opencode_session(target, session_id, timeout, ssh_policy)
+        name = name or str(conversation.get("name") or "")
+        cwd = cwd if cwd is not None else str(conversation.get("cwd") or "")
+    return ensure_opencode_tmux_session(
+        target,
+        session_id,
+        name or "opencode",
+        cwd or "",
+        timeout,
+        ssh_policy,
+    )
+
+
 def _terminal_command(terminal: str, inner: list[str]) -> list[str]:
     command = shlex.split(terminal)
     if not command:
@@ -1343,6 +1655,12 @@ def _valid_thread_id(value: str) -> str:
     return value
 
 
+def _valid_opencode_id(value: str) -> str:
+    if not OPENCODE_ID_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError("expected an opencode session id")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
@@ -1409,6 +1727,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="detach the terminal after resolving the session",
     )
 
+    opencode_parser = subparsers.add_parser(
+        "open-opencode", help="open or resume an opencode session"
+    )
+    opencode_parser.add_argument("--host", default="local")
+    opencode_parser.add_argument("--window-host")
+    opencode_parser.add_argument("--id", required=True, type=_valid_opencode_id)
+    opencode_parser.add_argument("--name")
+    opencode_parser.add_argument("--cwd")
+    opencode_parser.add_argument("--terminal", default=os.environ.get("TERMINAL", "ghostty"))
+    opencode_parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="detach the terminal after resolving the session",
+    )
+
     return parser
 
 
@@ -1457,7 +1790,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         target = resolve_host_target(parse_host_target(args.host), ssh_policy)
-        if args.command == "open-claude":
+        if args.command == "open-opencode":
+            session = resolve_opencode_open_target(
+                target,
+                args.id,
+                args.name,
+                args.cwd,
+                args.timeout,
+                ssh_policy,
+            )
+        elif args.command == "open-claude":
             session = resolve_claude_open_target(
                 target,
                 args.id,

@@ -1,11 +1,12 @@
 # DMS Agent Picker
 
-A DankMaterialShell launcher plugin for Codex CLI and Claude Code sessions
-across local and SSH hosts.
+A DankMaterialShell launcher plugin for Codex CLI, Claude Code, and opencode
+sessions across local and SSH hosts.
 
-The picker uses Codex's app-server protocol and Claude's local project
-transcripts for session metadata. It inspects running agent processes to map
-them back to tmux sessions. Remote hosts do not need this project installed.
+The picker uses Codex's app-server protocol, Claude's local project
+transcripts, and opencode's SQLite session store for session metadata. It
+inspects running agent processes to map them back to tmux sessions. Remote hosts
+do not need this project installed.
 
 ## Runtime scope
 
@@ -21,6 +22,12 @@ session, managed through tmux.
   hosted by its per-user supervisor are not supported, and the picker does not
   communicate with that supervisor. Headless and Agent SDK sessions are also
   outside the supported runtime.
+- opencode sessions are opened with `opencode --session`. The picker reads
+  opencode's session store directly, so it does not host or attach to an
+  opencode server process. Sessions that were started without a session id
+  (plain `opencode` or `opencode -c`) are not attributable to a specific
+  conversation and are ignored by active-session discovery unless they run in
+  a tmux session created by the picker.
 
 Claude's regular TUI and Agent View share the same project transcript storage.
 A stopped Agent View conversation can therefore appear in saved-session
@@ -41,12 +48,15 @@ Local desktop:
 Remote hosts:
 
 - Passwordless SSH
-- Codex CLI with `app-server` and `recency_at` thread sorting, and/or Claude Code
+- Codex CLI with `app-server` and `recency_at` thread sorting, and/or Claude Code,
+  and/or opencode
 - Python 3
 - tmux
 
-Claude Code is optional on every host. Its saved conversations are included
-automatically where it is installed.
+Claude Code and opencode are optional on every host. Their saved sessions are
+included automatically where installed. opencode discovery reads its SQLite
+store directly, so remote hosts only need Python 3; the opencode binary is
+required only to resume a conversation from the picker.
 
 ## Install
 
@@ -90,14 +100,14 @@ is refreshing, and each completed host updates the picker immediately. The
 plugin does not poll SSH hosts continuously while the picker is closed. The
 cache TTL defaults to 30 seconds and can be configured from 5 to 300 seconds.
 
-Launcher results use the right-side badge to identify Claude and Codex, while
-the subtitle shows the host, working directory, session age, and activity
-state. A single compact `Refreshing` status row appears at the top of the list
-and names the hosts whose probes are still in flight. DMS launcher plugins
-currently expose only selectable rows, so activating the informational row does
-nothing. If discovery cannot reach a host or only returns partial details, that
-row becomes a warning for 3 seconds after refresh completion, then disappears
-rather than lingering in the picker.
+Launcher results use the right-side badge to identify Claude, opencode, and
+Codex, while the subtitle shows the host, working directory, session age, and
+activity state. A single compact `Refreshing` status row appears at the top of
+the list and names the hosts whose probes are still in flight. DMS launcher
+plugins currently expose only selectable rows, so activating the informational
+row does nothing. If discovery cannot reach a host or only returns partial
+details, that row becomes a warning for 3 seconds after refresh completion,
+then disappears rather than lingering in the picker.
 
 ## CLI
 
@@ -115,8 +125,8 @@ dms-agent-picker list --route 'snap=snap.wg.lan|snap.lan' --limit 40 | jq
 
 For integrations that need per-host progress, opt into JSON Lines events. The
 stream starts with the configured connection targets, emits one
-`host-complete` event after that host's Codex, Claude, and activity probes have
-settled, then emits `refresh-finished`:
+`host-complete` event after that host's Codex, Claude, opencode, and activity
+probes have settled, then emits `refresh-finished`:
 
 ```sh
 dms-agent-picker list --host laptop.lan --stream
@@ -147,13 +157,22 @@ dms-agent-picker open-claude \
   --id 00000000-0000-0000-0000-000000000000
 ```
 
+Open a saved opencode session:
+
+```sh
+dms-agent-picker open-opencode \
+  --host laptop.lan \
+  --id ses_0319af718ffegy8N1IoMEggx4B
+```
+
 If the session is active in tmux, the picker attaches to that tmux session. If
 it is inactive, the picker creates a tmux session in the recorded working
-directory and resumes the selected UUID with `codex resume` or
-`claude --resume`. New agent processes wait for the terminal to attach before
-startup so terminal capability and color probes reach the actual terminal. A
-session that is still waiting is reused by a second launch attempt; an
-unattached session expires after one minute rather than lingering indefinitely.
+directory and resumes the selected UUID with `codex resume`,
+`claude --resume`, or `opencode --session`. New agent processes wait for the
+terminal to attach before startup so terminal capability and color probes
+reach the actual terminal. A session that is still waiting is reused by a
+second launch attempt; an unattached session expires after one minute rather
+than lingering indefinitely.
 
 On a local systemd desktop, session creation runs in a transient user scope so
 a newly created tmux server does not inherit `dms.service` and survives DMS
@@ -171,6 +190,13 @@ that variable is unset. Sessions created by this plugin carry their Claude UUID
 as tmux metadata, allowing later launcher queries to identify and reuse the
 exact active conversation. Headless and Agent SDK sessions are omitted, matching
 Claude Code's interactive session picker.
+
+opencode sessions are discovered from its SQLite store at
+`$XDG_DATA_HOME/opencode/opencode.db`, or
+`~/.local/share/opencode/opencode.db` when that variable is unset. Sessions
+created by this plugin carry their opencode session id as tmux metadata,
+allowing later launcher queries to identify and reuse the exact active
+conversation. Unattributed `opencode` and `opencode -c` processes are omitted.
 
 Under niri, the picker first focuses an existing terminal window attached to
 the same host and tmux session. It opens a new terminal only when no matching
