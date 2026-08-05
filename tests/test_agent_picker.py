@@ -163,6 +163,15 @@ class ProjectMetadataTest(unittest.TestCase):
         self.assertEqual(picker.VERSION, plugin["version"])
         self.assertEqual(picker.VERSION, project["project"]["version"])
 
+    def test_optional_provider_dependencies_are_not_required(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        plugin = json.loads((root / "plugin.json").read_text())
+
+        self.assertEqual(
+            {"codex", "ghostty", "python", "ssh", "tmux"},
+            set(plugin["dependencies"]),
+        )
+
     def test_plugin_uses_the_agent_picker_identity(self) -> None:
         root = Path(__file__).resolve().parents[1]
         plugin = json.loads((root / "plugin.json").read_text())
@@ -1036,12 +1045,12 @@ class OpencodeSessionTest(unittest.TestCase):
         conn.execute(
             "CREATE TABLE session ("
             "id text PRIMARY KEY, title text NOT NULL, directory text NOT NULL, "
-            "time_updated integer NOT NULL, time_archived integer"
+            "time_updated integer NOT NULL, time_archived integer, parent_id text"
             ")"
         )
         conn.executemany(
-            "INSERT INTO session (id, title, directory, time_updated, time_archived) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO session (id, title, directory, time_updated, time_archived, parent_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             sessions,
         )
         conn.commit()
@@ -1066,8 +1075,9 @@ class OpencodeSessionTest(unittest.TestCase):
             self._database(
                 root,
                 [
-                    (OPENCODE_ID, "Improve auth flow", "/home/test/code/app", 2_000_000_000_000, None),
-                    ("ses_archived", "Old work", "/home/test", 3_000_000_000_000, 3_000_000_000_001),
+                    (OPENCODE_ID, "Improve auth flow", "/home/test/code/app", 2_000_000_000_000, None, None),
+                    ("ses_archived", "Old work", "/home/test", 3_000_000_000_000, 3_000_000_000_001, None),
+                    ("ses_child", "Internal task", "/home/test/code/app", 4_000_000_000_000, None, OPENCODE_ID),
                 ],
             )
             with mock.patch.dict(os.environ, self._environment(root)):
@@ -1089,17 +1099,49 @@ class OpencodeSessionTest(unittest.TestCase):
     def test_reads_one_session_by_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None)])
+            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None)])
             with mock.patch.dict(os.environ, self._environment(root)):
                 session = picker.read_opencode_session(picker.HostTarget(None), OPENCODE_ID, 2.0)
 
         self.assertEqual(OPENCODE_ID, session["id"])
         self.assertEqual("Title", session["name"])
 
+    def test_does_not_read_child_session_by_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._database(
+                root,
+                [
+                    (OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None),
+                    ("ses_child", "Internal task", "/home/test", 3_000_000_000_000, None, OPENCODE_ID),
+                ],
+            )
+            with (
+                mock.patch.dict(os.environ, self._environment(root)),
+                self.assertRaisesRegex(picker.PickerError, "was not found"),
+            ):
+                picker.read_opencode_session(picker.HostTarget(None), "ses_child", 2.0)
+
+    def test_surfaces_database_query_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            db_dir = root / "data" / "opencode"
+            db_dir.mkdir(parents=True)
+            database = db_dir / "opencode.db"
+            conn = sqlite3.connect(database)
+            conn.execute("CREATE TABLE session (id text PRIMARY KEY)")
+            conn.commit()
+            conn.close()
+            with (
+                mock.patch.dict(os.environ, self._environment(root)),
+                self.assertRaisesRegex(picker.PickerError, "opencode session query failed"),
+            ):
+                picker.list_opencode_sessions(picker.HostTarget(None), 20, 2.0)
+
     def test_probe_reports_not_installed_without_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None)])
+            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None)])
             with mock.patch.dict(os.environ, self._environment(root, with_opencode=False)):
                 result = picker.list_opencode_sessions(picker.HostTarget(None), 20, 2.0)
 

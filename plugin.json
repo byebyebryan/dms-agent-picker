@@ -12,5 +12,5 @@
   "settings": "./AgentPickerSettings.qml",
   "trigger": "agent:",
   "permissions": ["process", "settings_read", "settings_write"],
-  "dependencies": ["codex", "claude", "ghostty", "opencode", "python", "ssh", "tmux"]
+  "dependencies": ["codex", "ghostty", "python", "ssh", "tmux"]
 }
