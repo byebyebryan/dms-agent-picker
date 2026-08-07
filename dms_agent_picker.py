@@ -294,7 +294,9 @@ def _query_session_probe(
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise PickerError(f"{provider} session query returned invalid JSON on {target.key}") from exc
+        raise PickerError(
+            f"{provider} session query returned invalid JSON on {target.key}"
+        ) from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
         raise PickerError(f"{provider} session query returned invalid data on {target.key}")
     return payload
@@ -1033,7 +1035,9 @@ def merge_host_results(
                 sessions.append(session)
 
         if isinstance(opencode_result, Exception):
-            errors.append({"host": target.key, "stage": "opencode", "message": str(opencode_result)})
+            errors.append(
+                {"host": target.key, "stage": "opencode", "message": str(opencode_result)}
+            )
         elif opencode_result.get("installed"):
             for conversation in opencode_result.get("sessions", []):
                 if not isinstance(conversation, dict):

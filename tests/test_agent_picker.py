@@ -1075,9 +1075,30 @@ class OpencodeSessionTest(unittest.TestCase):
             self._database(
                 root,
                 [
-                    (OPENCODE_ID, "Improve auth flow", "/home/test/code/app", 2_000_000_000_000, None, None),
-                    ("ses_archived", "Old work", "/home/test", 3_000_000_000_000, 3_000_000_000_001, None),
-                    ("ses_child", "Internal task", "/home/test/code/app", 4_000_000_000_000, None, OPENCODE_ID),
+                    (
+                        OPENCODE_ID,
+                        "Improve auth flow",
+                        "/home/test/code/app",
+                        2_000_000_000_000,
+                        None,
+                        None,
+                    ),
+                    (
+                        "ses_archived",
+                        "Old work",
+                        "/home/test",
+                        3_000_000_000_000,
+                        3_000_000_000_001,
+                        None,
+                    ),
+                    (
+                        "ses_child",
+                        "Internal task",
+                        "/home/test/code/app",
+                        4_000_000_000_000,
+                        None,
+                        OPENCODE_ID,
+                    ),
                 ],
             )
             with mock.patch.dict(os.environ, self._environment(root)):
@@ -1099,7 +1120,9 @@ class OpencodeSessionTest(unittest.TestCase):
     def test_reads_one_session_by_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None)])
+            self._database(
+                root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None)]
+            )
             with mock.patch.dict(os.environ, self._environment(root)):
                 session = picker.read_opencode_session(picker.HostTarget(None), OPENCODE_ID, 2.0)
 
@@ -1113,7 +1136,14 @@ class OpencodeSessionTest(unittest.TestCase):
                 root,
                 [
                     (OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None),
-                    ("ses_child", "Internal task", "/home/test", 3_000_000_000_000, None, OPENCODE_ID),
+                    (
+                        "ses_child",
+                        "Internal task",
+                        "/home/test",
+                        3_000_000_000_000,
+                        None,
+                        OPENCODE_ID,
+                    ),
                 ],
             )
             with (
@@ -1141,7 +1171,9 @@ class OpencodeSessionTest(unittest.TestCase):
     def test_probe_reports_not_installed_without_binary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self._database(root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None)])
+            self._database(
+                root, [(OPENCODE_ID, "Title", "/home/test", 2_000_000_000_000, None, None)]
+            )
             with mock.patch.dict(os.environ, self._environment(root, with_opencode=False)):
                 result = picker.list_opencode_sessions(picker.HostTarget(None), 20, 2.0)
 
@@ -1212,9 +1244,7 @@ class OpencodeSessionTest(unittest.TestCase):
         self.assertEqual("laptop.lan", session["connectHost"])
 
     def test_open_parser_accepts_opencode_session_ids(self) -> None:
-        args = picker.build_parser().parse_args(
-            ["open-opencode", "--id", OPENCODE_ID, "--detach"]
-        )
+        args = picker.build_parser().parse_args(["open-opencode", "--id", OPENCODE_ID, "--detach"])
 
         self.assertEqual("open-opencode", args.command)
         self.assertEqual(OPENCODE_ID, args.id)
