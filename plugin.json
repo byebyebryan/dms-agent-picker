@@ -1,5 +1,4 @@
 {
-  "$schema": "https://danklinux.com/schemas/plugin.json",
   "id": "agentPicker",
   "name": "Agent Picker",
   "description": "Open local and SSH Codex, Claude Code, and opencode sessions",

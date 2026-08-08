@@ -10,6 +10,11 @@ if [ -e "$plugin_dir/agentPicker" ] && [ ! -L "$plugin_dir/agentPicker" ]; then
     printf '%s\n' "agentPicker is an existing directory; update its pinned deployment instead" >&2
     exit 1
 fi
+if [ -e "$bin_dir/dms-agent-picker" ] && [ ! -L "$bin_dir/dms-agent-picker" ]; then
+    printf '%s\n' "$bin_dir/dms-agent-picker is an existing file; remove it first" >&2
+    exit 1
+fi
+chmod +x "$repo_dir/bin/dms-agent-picker"
 ln -sfn "$repo_dir/bin/dms-agent-picker" "$bin_dir/dms-agent-picker"
 ln -sfn "$repo_dir" "$plugin_dir/agentPicker"
 

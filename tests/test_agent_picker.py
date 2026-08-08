@@ -638,6 +638,65 @@ class ClaudeSessionTest(unittest.TestCase):
         self.assertEqual("/home/test/code/app", result["sessions"][0]["cwd"])
         self.assertEqual(2_000_000_000, result["sessions"][0]["recencyAt"])
 
+    def test_finds_custom_title_beyond_old_head_region(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            claude = bin_dir / "claude"
+            claude.write_text("#!/bin/sh\nexit 0\n")
+            claude.chmod(0o755)
+
+            config_dir = root / ".claude"
+            project_dir = config_dir / "projects" / "-home-test-code-app"
+            project_dir.mkdir(parents=True)
+            transcript = project_dir / f"{THREAD_C}.jsonl"
+            lines = [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": THREAD_C,
+                        "cwd": "/home/test/code/app",
+                        "entrypoint": "cli",
+                        "message": {"role": "user", "content": "Start"},
+                    }
+                )
+            ]
+            big = "x" * 300_000
+            for _ in range(4):
+                lines.append(
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "sessionId": THREAD_C,
+                            "message": {"role": "user", "content": big},
+                        }
+                    )
+                )
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "custom-title",
+                        "sessionId": THREAD_C,
+                        "customTitle": "Middle rename",
+                    }
+                )
+            )
+            transcript.write_text("\n".join(lines) + "\n")
+            transcript_size = transcript.stat().st_size
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CONFIG_DIR": str(config_dir),
+                    "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                },
+            ):
+                result = picker.list_claude_sessions(picker.HostTarget(None), 20, 2.0)
+
+        self.assertGreater(transcript_size, 1_000_000)
+        self.assertEqual("Middle rename", result["sessions"][0]["name"])
+
     def test_active_snapshot_uses_managed_tmux_session_id(self) -> None:
         with mock.patch.object(picker, "_claude_session_id_for_process", return_value=None):
             active = picker._claude_active_sessions(

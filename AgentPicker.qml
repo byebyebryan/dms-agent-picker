@@ -30,6 +30,11 @@ Item {
     property bool showingUnavailableNotice: false
     property double lastRefreshMs: 0
     readonly property int unavailableNoticeSeconds: 3
+    // Must match DEFAULT_TIMEOUT in dms_agent_picker.py; the helper bounds
+    // every probe with it, so this is the per-host probe budget.
+    readonly property int probeTimeoutSeconds: 4
+    property int refreshTimeoutMs: 30000
+    property bool abortedRefresh: false
 
     signal itemsChanged()
 
@@ -52,6 +57,23 @@ Item {
         onTriggered: {
             root.showingUnavailableNotice = false;
             root.itemsChanged();
+        }
+    }
+
+    // Backstop for a hung helper: if the process never exits, forcibly abort
+    // it so a later query can re-poll instead of serving stale data forever.
+    Timer {
+        id: listWatchdog
+
+        interval: root.refreshTimeoutMs
+        repeat: false
+        onTriggered: {
+            if (!listProcess.running)
+                return;
+            console.warn(root.pluginName + ": refresh timed out, aborting helper");
+            root.abortedRefresh = true;
+            root.failPendingRefresh("refresh timed out");
+            listProcess.running = false;
         }
     }
 
@@ -154,7 +176,14 @@ Item {
     function refresh() {
         if (listProcess.running)
             return;
-        beginRefresh(requestedHostKeys());
+        const hostsToRefresh = requestedHostKeys();
+        root.refreshTimeoutMs = Math.max(
+            30000,
+            hostsToRefresh.length
+                * (probeTimeoutSeconds + sshConnectTimeout + sshConnectionAttempts * 2)
+                * 1000
+        );
+        beginRefresh(hostsToRefresh);
         const command = [
             helper,
             "--ssh-connect-timeout", String(sshConnectTimeout),
@@ -175,6 +204,7 @@ Item {
             command.push("--alias", alias);
         listProcess.command = command;
         listProcess.running = true;
+        listWatchdog.restart();
     }
 
     function beginRefresh(hostsToRefresh) {
@@ -189,6 +219,7 @@ Item {
         refreshFailures = {};
         receivedRefreshFinished = false;
         streamMalformed = false;
+        abortedRefresh = false;
         showingUnavailableNotice = false;
         unavailableNoticeTimer.stop();
         rebuildResults();
@@ -220,6 +251,7 @@ Item {
     }
 
     function finishRefresh() {
+        listWatchdog.stop();
         if (pendingHosts.length > 0) {
             streamMalformed = true;
             console.warn(pluginName + ": helper finished with hosts still pending");
@@ -232,6 +264,7 @@ Item {
     }
 
     function failPendingRefresh(message) {
+        listWatchdog.stop();
         const affectedHosts = pendingHosts.length > 0 ? pendingHosts : refreshHosts;
         if (affectedHosts.length === 0)
             return;
@@ -269,7 +302,7 @@ Item {
                 finishRefresh();
                 return;
             }
-            throw new Error("unknown event " + event.event);
+            console.warn(root.pluginName + ": ignoring unknown event " + event.event);
         } catch (error) {
             streamMalformed = true;
             console.warn(pluginName + ": invalid helper output: " + String(error));
@@ -642,19 +675,31 @@ Item {
         running: false
 
         onExited: exitCode => {
+            listWatchdog.stop();
+            if (root.abortedRefresh) {
+                root.abortedRefresh = false;
+                return;
+            }
             if (exitCode !== 0)
                 console.warn(root.pluginName + ": helper exited with " + exitCode);
-            if (!root.receivedRefreshFinished || root.pendingHosts.length > 0) {
+            if (root.receivedRefreshFinished)
+                return;
+            if (root.pendingHosts.length > 0) {
                 const message = root.streamMalformed
                     ? "helper emitted invalid refresh data"
                     : exitCode === 0
                         ? "helper ended before completing refresh"
                         : "helper exited with " + exitCode;
                 root.failPendingRefresh(message);
-            } else if (root.streamMalformed) {
-                root.lastRefreshMs = 0;
-                root.itemsChanged();
+                return;
             }
+            // All hosts reported host-complete but the refresh-finished footer
+            // was lost at stream end. The data is complete, so finish normally
+            // instead of failing every host and forcing a hot re-poll.
+            root.receivedRefreshFinished = true;
+            root.lastRefreshMs = Date.now();
+            root.updateUnavailableNotice();
+            root.itemsChanged();
         }
 
         stdout: SplitParser {

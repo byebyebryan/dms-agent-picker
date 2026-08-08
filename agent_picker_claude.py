@@ -52,34 +52,19 @@ def timestamp_seconds(value):
     return int(value / 1000 if value > 100000000000 else value)
 
 
-def read_json_lines(path, maximum_bytes=2097152):
+def iter_json_lines(path):
     try:
-        size = path.stat().st_size
-        with path.open("rb") as stream:
-            if size <= maximum_bytes:
-                data = stream.read()
-            else:
-                edge = maximum_bytes // 2
-                head = stream.read(edge)
-                stream.seek(-edge, os.SEEK_END)
-                tail = stream.read(edge)
-                if b"\n" in head:
-                    head = head.rsplit(b"\n", 1)[0]
-                if b"\n" in tail:
-                    tail = tail.split(b"\n", 1)[1]
-                data = head + b"\n" + tail
+        stream = path.open("rb")
     except (OSError, ValueError):
-        return []
-
-    entries = []
-    for raw_line in data.splitlines():
-        try:
-            entry = json.loads(raw_line)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if isinstance(entry, dict):
-            entries.append(entry)
-    return entries
+        return
+    with stream:
+        for raw_line in stream:
+            try:
+                entry = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(entry, dict):
+                yield entry
 
 
 transcripts = []
@@ -131,7 +116,7 @@ for modified, session_id, path in transcripts:
     first_prompt = ""
     custom_title = ""
     entrypoint = ""
-    for entry in read_json_lines(path):
+    for entry in iter_json_lines(path):
         if not cwd and isinstance(entry.get("cwd"), str):
             cwd = entry["cwd"]
         if not entrypoint and isinstance(entry.get("entrypoint"), str):
@@ -146,6 +131,8 @@ for modified, session_id, path in transcripts:
             and not entry.get("isMeta")
         ):
             first_prompt = message_text(entry.get("message"))
+        if cwd and entrypoint and custom_title and first_prompt:
+            break
     if entrypoint == "sdk-cli":
         continue
     name = custom_title or str(history_item.get("name") or "") or first_prompt
