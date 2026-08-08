@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -183,6 +184,44 @@ class ProjectMetadataTest(unittest.TestCase):
         self.assertEqual(
             {"AgentPicker.qml", "AgentPickerSettings.qml"},
             {path.name for path in root.glob("Agent*.qml")},
+        )
+
+
+class QmlContractTest(unittest.TestCase):
+    def test_host_problems_distinguishes_partial_and_total_session_failures(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (root / "AgentPicker.qml").read_text()
+        match = re.search(
+            r"function hostProblems\(\)\s*\{(?P<body>.*?)\n    \}\n\n    function hasHostProblems",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        body = match.group("body")
+        self.assertIn(
+            'const sessionStages = ["threads", "claude", "opencode"];',
+            body,
+        )
+        self.assertIn(
+            "const sessionsUnavailable = sessionStages.some(\n"
+            "                stage => stages.includes(stage)\n"
+            "            );",
+            body,
+        )
+        self.assertIn(
+            "const allSessionsUnavailable = sessionStages.every(\n"
+            "                stage => stages.includes(stage)\n"
+            "            );",
+            body,
+        )
+        self.assertIn("if (allSessionsUnavailable && activityUnavailable) {", body)
+        self.assertIn(
+            "if (sessionsUnavailable)\n                problems.sessions.push(host);",
+            body,
+        )
+        self.assertIn(
+            "if (activityUnavailable)\n                problems.activity.push(host);",
+            body,
         )
 
 
@@ -637,6 +676,69 @@ class ClaudeSessionTest(unittest.TestCase):
         self.assertEqual("Improve auth flow", result["sessions"][0]["name"])
         self.assertEqual("/home/test/code/app", result["sessions"][0]["cwd"])
         self.assertEqual(2_000_000_000, result["sessions"][0]["recencyAt"])
+
+    def test_latest_custom_title_wins_in_transcript_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            claude = bin_dir / "claude"
+            claude.write_text("#!/bin/sh\nexit 0\n")
+            claude.chmod(0o755)
+
+            config_dir = root / ".claude"
+            project_dir = config_dir / "projects" / "-home-test-code-app"
+            project_dir.mkdir(parents=True)
+            transcript = project_dir / f"{THREAD_C}.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "sessionId": THREAD_C,
+                                "cwd": "/home/test/code/app",
+                                "entrypoint": "cli",
+                                "message": {"role": "user", "content": "Initial request"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "custom-title",
+                                "sessionId": THREAD_C,
+                                "customTitle": "Initial title",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "custom-title",
+                                "sessionId": THREAD_C,
+                                "customTitle": "Latest title",
+                            }
+                        ),
+                        '{"type":"custom-title","customTitle":',
+                        json.dumps(
+                            {
+                                "type": "custom-title",
+                                "sessionId": THREAD_C,
+                                "customTitle": "",
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CLAUDE_CONFIG_DIR": str(config_dir),
+                    "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                },
+            ):
+                result = picker.list_claude_sessions(picker.HostTarget(None), 20, 2.0)
+
+        self.assertEqual("Latest title", result["sessions"][0]["name"])
 
     def test_finds_custom_title_beyond_old_head_region(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

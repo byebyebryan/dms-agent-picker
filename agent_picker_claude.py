@@ -2,6 +2,7 @@
 
 SESSION_PROBE = r"""
 import json
+import mmap
 import os
 import re
 import shutil
@@ -67,6 +68,47 @@ def iter_json_lines(path):
                 yield entry
 
 
+def reverse_line_ranges(mapped):
+    chunk_size = 64 * 1024
+    end = len(mapped)
+    while end > 0:
+        search_end = end
+        while search_end > 0:
+            search_start = max(0, search_end - chunk_size)
+            newline = mapped.rfind(b"\n", search_start, search_end)
+            if newline >= 0:
+                yield newline + 1, end
+                end = newline
+                break
+            search_end = search_start
+        else:
+            yield 0, end
+            return
+
+
+def latest_custom_title(path):
+    try:
+        with path.open("rb") as stream:
+            if os.fstat(stream.fileno()).st_size == 0:
+                return ""
+            with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                for start, end in reverse_line_ranges(mapped):
+                    if mapped.find(b"custom-title", start, end) < 0:
+                        continue
+                    try:
+                        entry = json.loads(mapped[start:end])
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(entry, dict) or entry.get("type") != "custom-title":
+                        continue
+                    title = clean_text(entry.get("customTitle"))
+                    if title:
+                        return title
+    except (OSError, ValueError):
+        return ""
+    return ""
+
+
 transcripts = []
 if projects_dir.is_dir():
     for path in projects_dir.glob("*/*.jsonl"):
@@ -114,27 +156,25 @@ for modified, session_id, path in transcripts:
     history_item = history.get(session_id, {})
     cwd = str(history_item.get("cwd") or "")
     first_prompt = ""
-    custom_title = ""
     entrypoint = ""
     for entry in iter_json_lines(path):
-        if not cwd and isinstance(entry.get("cwd"), str):
-            cwd = entry["cwd"]
-        if not entrypoint and isinstance(entry.get("entrypoint"), str):
-            entrypoint = entry["entrypoint"]
-        if entry.get("type") == "custom-title":
-            title = clean_text(entry.get("customTitle"))
-            if title:
-                custom_title = title
+        entry_cwd = entry.get("cwd")
+        if not cwd and isinstance(entry_cwd, str) and entry_cwd:
+            cwd = entry_cwd
+        entry_entrypoint = entry.get("entrypoint")
+        if not entrypoint and isinstance(entry_entrypoint, str) and entry_entrypoint:
+            entrypoint = entry_entrypoint
         if (
             not first_prompt
             and entry.get("type") == "user"
             and not entry.get("isMeta")
         ):
             first_prompt = message_text(entry.get("message"))
-        if cwd and entrypoint and custom_title and first_prompt:
+        if entrypoint == "sdk-cli" or (cwd and entrypoint and first_prompt):
             break
     if entrypoint == "sdk-cli":
         continue
+    custom_title = latest_custom_title(path)
     name = custom_title or str(history_item.get("name") or "") or first_prompt
     if not name:
         name = Path(cwd).name if cwd else "Claude " + session_id[:8]

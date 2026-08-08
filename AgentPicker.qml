@@ -469,9 +469,14 @@ Item {
                 continue;
             const stages = grouped[host];
             const activityUnavailable = stages.includes("active");
-            const sessionsUnavailable = stages.includes("threads")
-                && stages.includes("claude");
-            if (sessionsUnavailable && activityUnavailable) {
+            const sessionStages = ["threads", "claude", "opencode"];
+            const sessionsUnavailable = sessionStages.some(
+                stage => stages.includes(stage)
+            );
+            const allSessionsUnavailable = sessionStages.every(
+                stage => stages.includes(stage)
+            );
+            if (allSessionsUnavailable && activityUnavailable) {
                 problems.unreachable.push(host);
                 continue;
             }
