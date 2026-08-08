@@ -341,7 +341,7 @@ Item {
         const home = Quickshell.env("HOME");
         if (path === home)
             return "~";
-        if (home && path.startsWith(home + "/"))
+        if (home && path && path.startsWith(home + "/"))
             return "~/" + path.slice(home.length + 1);
         return path || "~";
     }

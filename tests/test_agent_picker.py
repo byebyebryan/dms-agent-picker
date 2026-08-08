@@ -747,6 +747,16 @@ class TmuxNameTest(unittest.TestCase):
             picker._safe_tmux_name("project:name.test", THREAD_A),
         )
 
+    def test_rejects_invalid_ids_in_session_scripts(self) -> None:
+        with self.assertRaisesRegex(picker.PickerError, "invalid Codex session id"):
+            picker._ensure_session_script("not-a-uuid", "project", "/home/test")
+        with self.assertRaisesRegex(picker.PickerError, "invalid Claude session id"):
+            picker._ensure_claude_session_script("not-a-uuid", "project", "/home/test")
+        with self.assertRaisesRegex(picker.PickerError, "invalid opencode session id"):
+            picker._ensure_opencode_session_script(
+                "00000000-0000-0000-0000-000000000001", "p", "/home"
+            )
+
     def test_agent_start_waits_for_attached_tmux_client(self) -> None:
         wait_script = picker._tmux_client_wait_script()
 
@@ -927,6 +937,14 @@ class HostConfigTest(unittest.TestCase):
             picker.parse_host_routes(["snap"])
         with self.assertRaisesRegex(picker.PickerError, "duplicate host route"):
             picker.parse_host_routes(["snap=snap.wg.lan,snap=snap.lan"])
+
+    def test_rejects_hosts_and_endpoints_starting_with_dash(self) -> None:
+        with self.assertRaisesRegex(picker.PickerError, "invalid host"):
+            picker.parse_host_target("-oProxyCommand=evil")
+        with self.assertRaisesRegex(picker.PickerError, "invalid host"):
+            picker.build_host_targets(["-oProxyCommand=evil"], include_local=False)
+        with self.assertRaisesRegex(picker.PickerError, "invalid host route endpoint"):
+            picker.parse_host_routes(["snap=-oProxyCommand=evil"])
 
     def test_uses_first_reachable_route_path(self) -> None:
         route = picker.parse_host_routes(["snap=snap.wg.lan|snap.lan"])[0]
@@ -1298,6 +1316,87 @@ class OpencodeSessionTest(unittest.TestCase):
             picker.resolve_opencode_open_target(
                 picker.HostTarget(None), OPENCODE_ID, "Fix auth flow", "/tmp", 1.0
             )
+
+    def test_inactive_opencode_creates_managed_session(self) -> None:
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "desktop",
+                    "active": {},
+                    "claudeActive": {},
+                    "opencodeInstalled": True,
+                    "opencodeActive": {},
+                },
+            ),
+            mock.patch.object(
+                picker, "ensure_opencode_tmux_session", return_value="auth-flow"
+            ) as ensure,
+        ):
+            session = picker.resolve_opencode_open_target(
+                picker.HostTarget(None),
+                OPENCODE_ID,
+                "Fix auth flow",
+                "/home/test/code/app",
+                1.0,
+            )
+
+        self.assertEqual("auth-flow", session)
+        ensure.assert_called_once()
+
+    def test_opencode_not_installed_raises(self) -> None:
+        with (
+            mock.patch.object(
+                picker,
+                "get_active_snapshot",
+                return_value={
+                    "host": "desktop",
+                    "active": {},
+                    "claudeActive": {},
+                    "opencodeInstalled": False,
+                    "opencodeActive": {},
+                },
+            ),
+            self.assertRaisesRegex(picker.PickerError, "not installed"),
+        ):
+            picker.resolve_opencode_open_target(
+                picker.HostTarget(None), OPENCODE_ID, "Fix auth flow", "/tmp", 1.0
+            )
+
+    def test_unavailable_opencode_sessions_are_omitted(self) -> None:
+        result = picker.merge_host_results(
+            [
+                (
+                    picker.HostTarget(None),
+                    [],
+                    {"installed": False, "sessions": []},
+                    {"installed": False, "sessions": [{"id": OPENCODE_ID}]},
+                    {"host": "desktop", "active": {}, "claudeActive": {}, "opencodeActive": {}},
+                )
+            ],
+            limit=20,
+        )
+
+        self.assertEqual([], result["sessions"])
+
+    def test_opencode_list_failure_emits_stage_error(self) -> None:
+        result = picker.merge_host_results(
+            [
+                (
+                    picker.HostTarget(None),
+                    [],
+                    {"installed": False, "sessions": []},
+                    picker.PickerError("opencode probe failed"),
+                    {"host": "desktop", "active": {}, "claudeActive": {}, "opencodeActive": {}},
+                )
+            ],
+            limit=20,
+        )
+
+        self.assertEqual([], result["sessions"])
+        self.assertEqual("opencode", result["errors"][0]["stage"])
+        self.assertIn("opencode probe failed", result["errors"][0]["message"])
 
     def test_managed_session_resumes_exact_id_in_recorded_directory(self) -> None:
         script = picker._ensure_opencode_session_script(

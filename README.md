@@ -55,8 +55,9 @@ Remote hosts:
 
 Claude Code and opencode are optional on every host. Their saved sessions are
 included automatically where installed. opencode discovery reads its SQLite
-store directly, so remote hosts only need Python 3; the opencode binary is
-required only to resume a conversation from the picker.
+store directly rather than launching an opencode process, so it is fast and
+unobtrusive; like Claude Code, opencode sessions are still only listed where
+the opencode binary is installed.
 
 ## Install
 

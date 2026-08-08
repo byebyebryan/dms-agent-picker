@@ -80,6 +80,12 @@ def _short_hostname(host: str) -> str:
     return host.rstrip(".").split(".", 1)[0].casefold()
 
 
+def _validate_host(host: str) -> str:
+    if host.startswith("-"):
+        raise PickerError(f"invalid host {host!r}")
+    return host
+
+
 def parse_host_aliases(values: Sequence[str]) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for value in values:
@@ -113,7 +119,7 @@ def parse_host_routes(values: Sequence[str]) -> list[HostTarget]:
                 raise PickerError(f"invalid host route {entry!r}; expected name=endpoint|fallback")
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
                 raise PickerError(f"invalid host route name {name!r}")
-            if any(re.search(r"[\s,|=]", path) for path in paths):
+            if any(path.startswith("-") or re.search(r"[\s,|=]", path) for path in paths):
                 raise PickerError(f"invalid host route endpoint in {entry!r}")
             normalized_key = name.casefold()
             if normalized_key in seen_keys:
@@ -129,7 +135,7 @@ def parse_host_target(value: str) -> HostTarget:
         return HostTarget(None)
     if "=" in value:
         return parse_host_routes([value])[0]
-    return HostTarget(value)
+    return HostTarget(_validate_host(value))
 
 
 def _ssh_prefix(policy: SshPolicy) -> list[str]:
@@ -1115,7 +1121,7 @@ def build_host_targets(
                 targets.append(route)
         return targets
     targets.extend(
-        HostTarget(host.strip())
+        HostTarget(_validate_host(host.strip()))
         for host in hosts
         if host.strip() and _short_hostname(host.strip()) not in local_names
     )
@@ -1249,6 +1255,8 @@ def _tmux_client_wait_script() -> str:
 
 
 def _ensure_session_script(thread_id: str, name: str, cwd: str) -> str:
+    if not UUID_PATTERN.fullmatch(thread_id):
+        raise PickerError("invalid Codex session id")
     base = _safe_tmux_name(name, thread_id)
     short_id = thread_id[:8]
     wait_script = _tmux_client_wait_script()
@@ -1344,6 +1352,8 @@ def resolve_open_target(
 
 
 def _ensure_claude_session_script(session_id: str, name: str, cwd: str) -> str:
+    if not UUID_PATTERN.fullmatch(session_id):
+        raise PickerError("invalid Claude session id")
     base = _safe_tmux_name(name, session_id)
     short_id = session_id[:8]
     wait_script = _tmux_client_wait_script()
@@ -1446,6 +1456,8 @@ def resolve_claude_open_target(
 
 
 def _ensure_opencode_session_script(session_id: str, name: str, cwd: str) -> str:
+    if not OPENCODE_ID_PATTERN.fullmatch(session_id):
+        raise PickerError("invalid opencode session id")
     base = _safe_tmux_name(name, session_id)
     short_id = session_id[:8]
     wait_script = _tmux_client_wait_script()
